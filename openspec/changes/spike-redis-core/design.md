@@ -55,7 +55,7 @@ dòng code nào chứng minh điều này chạy đúng và đủ nhanh trên Re
   | --- | --- | --- |
   | `sh_create_task` | `workspace-members:{ws}`, `project:{p}`, `project-task-seq:{p}`, `workspace-task-keys:{ws}`, `task:{t}`, `project-tasks:{p}`, `board:{p}:TODO`, `user-assigned:{u}` (không gán: `user-assigned:none`, Function không đọc/ghi slot này), `workspace-seq:{ws}`, `workspace-changes:{ws}`, `stream:domain-events`, `idempotency:{actor}:{key}` | wsId, projectId, actorId, taskId, assigneeId hoặc rỗng, payload JSON, idempotencyKey, requestHash, clientMutationId, nowMs |
   | `sh_move_task` | `workspace-members:{ws}`, `project:{p}`, `task:{t}`, `board:{p}:{from}`, `board:{p}:{to}`, `workspace-seq:{ws}`, `workspace-changes:{ws}`, `stream:domain-events`, `idempotency:{actor}:{key}` | wsId, projectId, taskId, actorId, from, to, afterTaskId, beforeTaskId, expectedVersion, idempotencyKey, requestHash, clientMutationId, nowMs |
-  | `sh_remove_member` | `workspace-members:{ws}`, `user-workspaces:{u}`, `workspace-seq:{ws}`, `workspace-changes:{ws}`, `stream:domain-events` | wsId, actorId, userId, nowMs |
+  | `sh_remove_member` | `workspace-members:{ws}`, `user-workspaces:{u}`, `workspace-seq:{ws}`, `workspace-changes:{ws}`, `stream:domain-events`, `idempotency:{actor}:{key}` | wsId, actorId, userId, idempotencyKey, requestHash, nowMs |
 
   Key idempotency cũng được dựng lại từ ARGS (`idempotency:{actorId}:{idempotencyKey}`)
   và so với KEYS, nên caller không thể truyền key idempotency của actor khác.
@@ -81,7 +81,8 @@ dòng code nào chứng minh điều này chạy đúng và đủ nhanh trên Re
   `TASK_VERSION_CONFLICT` (`params.currentVersion`), `INVALID_STATUS_TRANSITION`,
   `INVALID_POSITION_ANCHOR`, `COLUMN_FULL` (`params.limit` = 500).
 - **Event:** mỗi mutation được chấp nhận phát đúng một event (`TASK_CREATED`,
-  `TASK_MOVED` có `rebalancedColumn` khi có rebalance, `MEMBER_REMOVED`) với một seq;
+  `TASK_MOVED`, `MEMBER_REMOVED`) với một seq; create hoặc move có rebalance thì event
+  của chính thao tác đó mang thêm `rebalancedColumn`;
   rebalance ghi thêm entry `board:{p}:{status}` vào `workspace-changes` cùng seq.
 - **Outbox tối thiểu trong spike:** create và move đều `INCR workspace-seq`,
   `ZADD workspace-changes`, `XADD stream:domain-events`; không có consumer.

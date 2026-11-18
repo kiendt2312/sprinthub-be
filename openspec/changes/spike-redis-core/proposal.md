@@ -16,7 +16,8 @@ số đo. Spike cũng chốt hai quyết định còn mở: bản Redis 8.x (ima
   - `sh_move_task`: bảng chuyển trạng thái, `expectedVersion`, idempotency, kiểm tra
     tenant và task neo, chèn trung điểm, giới hạn cột 500 task (`COLUMN_FULL`),
     rebalance cột ≤ 500 trong cùng một event.
-  - `sh_remove_member`: bản tối giản, chỉ làm fixture cho kịch bản write skew.
+  - `sh_remove_member`: bản tối giản (có `Idempotency-Key`), làm fixture cho kịch bản
+    write skew.
 - Viết verifier offline bằng TypeScript (`verify-task-indexes`), không phải Function.
 - Chạy kịch bản song song, retry, lỗi giữa chừng và restart; đo latency Function,
   `MEMORY USAGE`, so sánh `appendfsync always` với `everysec`.

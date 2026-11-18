@@ -237,7 +237,7 @@ Thứ tự dùng số nguyên cách quãng `STEP = 1024`. Client gửi `afterTas
 - Hết khoảng (`b − a < 2`) hoặc score mới vượt `|2^50|`: rebalance cả cột thành `i × 1024` theo thứ tự hiện tại rồi tính lại chỗ chèn, trong cùng Function (cột ≤ 500 task; con số này phải đo, vượt 5 ms thì hạ xuống).
 - **Giới hạn cột (P0):** số task của cột đích **sau** thao tác không được vượt 500 (create và move sang cột khác tính thêm 1, reorder cùng cột giữ nguyên); vượt thì `409 COLUMN_FULL` (`params.limit`) trước lệnh ghi đầu tiên. Client báo cho user, không retry.
 - **P1, chỉ khi nâng giới hạn cột:** cột lớn hơn giới hạn rebalance trong Function thì Function trả `409 BOARD_REBALANCE_REQUIRED` **trước khi ghi**; worker rebalance bằng job batch; client retry với **cùng** `Idempotency-Key` (lần trước không lưu gì) và không rollback như conflict.
-- Rebalance chỉ ghi ZSET board (vị trí không nằm trong JSON), nên không đổi `version` hay `lastSeq` của task nào khác. Move kèm rebalance vẫn là **một** mutation, **một** seq, **một** event `TASK_MOVED` có thêm `rebalancedColumn: "{status}"`; `workspace-changes` ghi `task:{id}` và `board:{p}:{status}` cùng seq. Client thấy `rebalancedColumn` thì tải lại cột đó, kể cả khi event đến từ chính tab của mình.
+- Rebalance chỉ ghi ZSET board (vị trí không nằm trong JSON), nên không đổi `version` hay `lastSeq` của task nào khác. Move (hoặc create ở cuối cột) kèm rebalance vẫn là **một** mutation, **một** seq, **một** event của chính thao tác (`TASK_MOVED` hoặc `TASK_CREATED`) có thêm `rebalancedColumn: "{status}"`; `workspace-changes` ghi `task:{id}` và `board:{p}:{status}` cùng seq. Client thấy `rebalancedColumn` thì tải lại cột đó, kể cả khi event đến từ chính tab của mình.
 - KEYS của move: `workspace-members`, `project`, `task`, `board:{p}:{from}`, `board:{p}:{to}`, `workspace-seq`, `workspace-changes`, `stream:domain-events`, `idempotency`. `from` do caller đọc từ task trước khi gọi. Task neo chỉ đọc bằng `ZSCORE`/`ZRANK` trên board đích: task đã xóa không còn trong board (invariant 7) nên thế là đủ; board bị hỏng là việc của verifier.
 
 Điều kiện trong Function, theo thứ tự chung:
@@ -258,7 +258,7 @@ Trong cùng Function: `HGET workspace-members newAssignee` (không còn là memb
 
 ### Remove member và job batch
 
-1. Function: `HDEL workspace-members`, `SREM user-workspaces`, audit, event `MEMBER_REMOVED`. Quyền bị thu hồi ngay từ đây.
+1. Function (theo quy ước chung, có `Idempotency-Key`: gửi lại cùng key chỉ có một event): `HDEL workspace-members`, `SREM user-workspaces`, audit, event `MEMBER_REMOVED`. Quyền bị thu hồi ngay từ đây.
 2. Worker nhận `MEMBER_REMOVED` → `JSON.SET job:{id} $ … NX` (id suy từ `eventId`, nên giao lại không tạo job thứ hai) → **rồi mới** `XACK`. Crash trước `JSON.SET` thì event được giao lại; crash sau thì job đã bền.
 3. Worker lấy lock `lock:unassign:{ws}:{user}` kèm `epoch = INCR fence:unassign:{ws}:{user}`; khởi động lại thì quét `job:*` chưa xong (ngoài request path) và chạy tiếp từ tiến độ đã lưu.
 4. Mỗi batch 100 task gọi `FCALL` kèm epoch. Function từ chối epoch cũ (fencing) và **kiểm tra lại** cho từng task: `task.workspaceId` đúng workspace của job (`user-assigned:{userId}` dùng chung mọi workspace nên phải lọc), user vẫn là assignee, user vẫn không phải member. Nếu user đã được mời lại thì bỏ qua.

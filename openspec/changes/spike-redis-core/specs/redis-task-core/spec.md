@@ -149,7 +149,8 @@ chèn đầu là `min − 1024`, chèn giữa `a < b` là `floor((a + b) / 2)` k
 ### Requirement: Rebalance cột giữ thứ tự trong cùng một mutation
 Khi `b − a < 2` hoặc score mới vượt `|2^50|` (kể cả create ở cuối cột), Function SHALL
 đánh số lại cả cột thành `i × 1024` giữ nguyên thứ tự rồi chèn, không đổi `version` của
-task khác, và vẫn phát đúng một event `TASK_MOVED` với `rebalancedColumn`; entry
+task khác, và vẫn phát đúng một event của thao tác (`TASK_MOVED` khi move, `TASK_CREATED`
+khi create) mang `rebalancedColumn`; entry
 `board:{p}:{status}` SHALL được ghi vào `workspace-changes` cùng seq.
 
 #### Scenario: Hết khoảng trống
@@ -216,3 +217,12 @@ ACK bị mất SHALL được đo và báo cáo.
 #### Scenario: Crash process khi đang ghi
 - **WHEN** client tạo task liên tục, ghi log mọi `taskId` đã gửi và đã nhận ACK, rồi Redis bị `kill -9` và khởi động lại trên cùng volume, chạy lần lượt với `always` và `everysec`
 - **THEN** mỗi task còn lại có đủ JSON, index, event `TASK_CREATED` và bản ghi idempotency; với `always` mọi `taskId` đã ACK đều còn; với `everysec` số `taskId` đã ACK bị mất và số request đang bay được ghi riêng vào `REPORT.md`
+
+### Requirement: Xóa member idempotent
+`sh_remove_member` SHALL nhận `Idempotency-Key` như mọi mutation nghiệp vụ: KEYS gồm
+`idempotency:{actorId}:{idempotencyKey}`, tra idempotency sau khi kiểm tra quyền, lưu ở
+cuối khi thành công.
+
+#### Scenario: Gửi lại lệnh xóa member
+- **WHEN** lệnh xóa user X thành công rồi được gửi lại với cùng `Idempotency-Key` và cùng payload
+- **THEN** Function trả đúng response lần đầu; `workspace-seq` và số event `MEMBER_REMOVED` chỉ tăng một lần
