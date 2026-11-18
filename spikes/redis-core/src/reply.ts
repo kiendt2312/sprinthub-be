@@ -1,0 +1,34 @@
+export type FunctionReply =
+  | { ok: true; data: unknown; seq: number }
+  | { ok: false; code: string; params: Record<string, unknown> };
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function decodeReply(raw: unknown): FunctionReply {
+  if (typeof raw !== "string") {
+    throw new Error("Redis Function reply must be a JSON string");
+  }
+
+  let reply: unknown;
+  try {
+    reply = JSON.parse(raw);
+  } catch (cause) {
+    throw new Error("Redis Function reply is not valid JSON", { cause });
+  }
+
+  if (isObject(reply)) {
+    if (
+      reply.ok === true && Object.hasOwn(reply, "data") &&
+      typeof reply.seq === "number" && Number.isSafeInteger(reply.seq)
+    ) {
+      return { ok: true, data: reply.data, seq: reply.seq };
+    }
+    if (reply.ok === false && typeof reply.code === "string" && isObject(reply.params)) {
+      return { ok: false, code: reply.code, params: reply.params };
+    }
+  }
+
+  throw new Error("Redis Function reply must have {ok: true, data, seq} or {ok: false, code, params}");
+}

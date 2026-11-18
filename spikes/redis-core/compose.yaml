@@ -1,7 +1,7 @@
-# Spike only. Pin the exact image digest after task 1.2 (see REPORT.md).
+# Spike only. The digest pins the multi-platform index (see REPORT.md).
 services:
   redis:
-    image: redis:8
+    image: redis:8.10.3@sha256:1f88291b4c57bdf249f02eb085a8669889b2d2954e91d4de5118a5da6b78dd53
     command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
     ports:
       - "127.0.0.1:6390:6379"

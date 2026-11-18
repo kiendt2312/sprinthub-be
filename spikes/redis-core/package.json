@@ -1,0 +1,23 @@
+{
+  "name": "sprinthub-redis-core-spike",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.21.0",
+  "engines": {
+    "node": "24.x"
+  },
+  "scripts": {
+    "seed": "tsx src/seed.ts",
+    "smoke": "tsx src/smoke.ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "redis": "6.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "vitest": "5.1.0"
+  }
+}
