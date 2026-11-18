@@ -1,6 +1,6 @@
 ## Context
 
-Thiết kế v1.5 (`docs/design/design.md`) đặt mọi thao tác ghi nhiều key vào Redis
+Thiết kế v1.6 (`docs/design/design.md`) đặt mọi thao tác ghi nhiều key vào Redis
 Functions và mọi điều kiện invariant vào trong Function (ADR-009, ADR-010). Chưa có
 dòng code nào chứng minh điều này chạy đúng và đủ nhanh trên Redis 8. Spike làm việc
 đó với phạm vi nhỏ nhất: workspace, project, task, board của một project.

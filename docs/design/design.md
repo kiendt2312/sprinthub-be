@@ -2,11 +2,11 @@
 
 Nov 18, 2026 · @Hieu Anh
 
-Bản thiết kế v1.5 (sau 2 vòng review spec spike): thứ tự cột chỉ nằm trong ZSET (bỏ `position`/`backlogRank` khỏi JSON), issue key tra qua HASH `workspace-task-keys`, Function đối chiếu KEYS với tenant thật trước khi kiểm tra quyền và replay idempotency, retry chỉ dùng `Idempotency-Key`, reply Function dạng JSON `{ok, code, params}`, move kèm rebalance chỉ phát một event. v1.4: Platform Admin tách thành 2 repo riêng (`sprinthub-admin-ui`, `sprinthub-admin-service`). v1.3 giữ 6 lỗi P0 đã sửa ở v1.2, cập nhật theo buổi grilling 18/11/2026 (3 repo, SSE, song ngữ EN/VI, luồng local → prod trên Oracle Free, chi phí $0). Phần nghiên cứu và lý do nằm ở tab bên cạnh.
+Bản thiết kế v1.6 (sau review spec dự án): auth và CLI admin không dùng cache response, CLI admin qua SSH với `sh-maint`, worker tạo notification rồi mới ghi `processed`, delta sync không cắt đôi nhóm cùng seq, backup là file RDB, envelope lỗi `{code, params}`, đọc board bằng pipeline `JSON.GET` nhiều path. v1.5 (sau 2 vòng review spec spike): thứ tự cột chỉ nằm trong ZSET (bỏ `position`/`backlogRank` khỏi JSON), issue key tra qua HASH `workspace-task-keys`, Function đối chiếu KEYS với tenant thật trước khi kiểm tra quyền và replay idempotency, retry chỉ dùng `Idempotency-Key`, reply Function dạng JSON `{ok, code, params}`, move kèm rebalance chỉ phát một event. v1.4: Platform Admin tách thành 2 repo riêng (`sprinthub-admin-ui`, `sprinthub-admin-service`). v1.3 giữ 6 lỗi P0 đã sửa ở v1.2, cập nhật theo buổi grilling 18/11/2026 (3 repo, SSE, song ngữ EN/VI, luồng local → prod trên Oracle Free, chi phí $0). Phần nghiên cứu và lý do nằm ở tab bên cạnh.
 
 ## Kiến trúc và phân lớp
 
-Một monolith NestJS chia module theo nghiệp vụ, một worker cùng codebase, một Redis node. Chỉ API và worker kết nối Redis. Trình duyệt gọi `/api/*` cùng origin qua Next.js rewrite; riêng stream SSE `/api/v1/events` được Caddy chuyển thẳng sang NestJS (không qua rewrite, tránh bị buffer).
+Một monolith NestJS chia module theo nghiệp vụ, một worker cùng codebase, một Redis node. Chỉ API, worker (repo này) và `sprinthub-admin-service` kết nối Redis; trình duyệt không bao giờ chạm Redis. Trình duyệt gọi `/api/*` cùng origin qua Next.js rewrite; riêng stream SSE `/api/v1/events` được Caddy chuyển thẳng sang NestJS (không qua rewrite, tránh bị buffer).
 
 | Lớp | Trách nhiệm | Không được làm |
 | --- | --- | --- |
@@ -99,7 +99,7 @@ JSON gốc là nguồn sự thật; mọi index phải dựng lại được t�
 | --- | --- | --- |
 | User | `email`, `emailNormalized`, `passwordHash` (Argon2id), `displayName`, `avatarUrl`, `disabledAt`, `suspendedBy`, `lastLoginAt` | Quyền Platform Admin **không** nằm ở đây; `passwordHash` không bao giờ ra API |
 | Workspace | `name`, `slug`, `ownerId`, `archivedAt`, `suspendedAt`, `suspendedBy` | Membership nằm ở HASH riêng |
-| Project | `workspaceId`, `name`, `key` (2–10 ký tự A–Z0–9), `description`, `createdBy`, `archivedAt` | Không đổi `key` khi đã có task (MVP) |
+| Project | `workspaceId`, `name`, `key` (2–10 ký tự A–Z0–9), `description`, `createdBy`, `archivedAt` | Không đổi `key` khi đã có task (MVP). Archived: ẩn khỏi list mặc định (`?archived=true` để xem), mọi Function ghi vào project/task của nó trả `PROJECT_ARCHIVED`, đọc và permalink vẫn chạy; Admin unarchive được |
 | Sprint | `projectId`, `number`, `name`, `goal`, `status` (PLANNED/ACTIVE/COMPLETING/COMPLETED), `startAt(Ms)`, `endAt`, `completedSummary` | Tối đa 1 ACTIVE mỗi project |
 | Label | `projectId`, `name`, `color`, `deletedAt` | Tên unique trong project |
 | Comment | `taskId`, `authorId`, `body` (Markdown), `deletedAt` |  |
@@ -169,7 +169,7 @@ Redis không có foreign key, nên 19 điều dưới đây là “ràng buộc�
 | Đồng bộ | Một Function: kiểm tra điều kiện → ghi JSON + index → `INCR workspace-seq` → `ZADD workspace-changes` → `XADD` event → lưu idempotency. `XADD` trong cùng Function chính là transactional outbox |
 | Bất đồng bộ | Worker xử lý at-least-once, mọi side effect idempotent |
 | Sửa chữa | Verify (dry-run) → báo cáo missing/orphan/wrong-score → apply trong maintenance mode |
-| Retry | `Idempotency-Key` bắt buộc cho mọi mutation ghi qua Function; đây là cơ chế retry duy nhất |
+| Retry | `Idempotency-Key` bắt buộc cho mọi mutation nghiệp vụ ghi qua Function (có actor đã xác thực); đây là cơ chế retry duy nhất. Auth và CLI theo quy tắc riêng ở mục Auth |
 
 **Atomic không có nghĩa là rollback.** Function không bị client khác xen ngang, nhưng nếu lỗi giữa chừng thì các lệnh đã chạy vẫn còn. Vì vậy Function đọc và kiểm tra mọi thứ trước lệnh ghi đầu tiên, không gọi mạng, và có test lỗi runtime giữa chừng.
 
@@ -285,13 +285,13 @@ Mỗi request đọc phải nằm trong ngân sách round trip cố định. Red
 | Màn hình | Cách đọc | Round trip |
 | --- | --- | --- |
 | Guard mọi request | Pipeline: `HGETALL session` + `INCR ratelimit` + `HGET workspace-members` | 1 |
-| Board | Pipeline 4×`ZRANGE` (×`ZINTER` khi có sprint) → `JSON.MGET` chỉ các path của thẻ: `$.key`, `$.title`, `$.priority`, `$.assigneeId`, `$.dueAtMs`, `$.labelIds`, `$.version` (không lấy description) | 2 |
+| Board | Pipeline 4×`ZRANGE` (×`ZINTER` khi có sprint) → pipeline `JSON.GET task:{id} $.key $.title $.priority $.assigneeId $.dueAtMs $.labelIds $.version` cho từng task, một batch mạng (`JSON.MGET` chỉ nhận một path nên không dùng ở đây; không lấy description) | 2 |
 | Chi tiết task | `JSON.GET` + `ZREVRANGE task-comments` + `task-activity` (pipeline) | 1–2 |
 | Backlog | `ZRANGE backlog` theo cursor → `JSON.MGET` | 2 |
 | Tra theo key | `HGET workspace-task-keys` → `JSON.GET` | 2 |
 | Filter label | `SINTER label-tasks:A label-tasks:B` giao với board/backlog | 2 |
 | Dashboard | `ZCARD` mỗi cột (pipeline) | 1 |
-| Delta sync | `ZRANGEBYSCORE workspace-changes (sinceSeq +inf LIMIT 0 500` → `JSON.MGET` các entry entity → lọc theo quyền; entry `board:{p}:{status}` trả về dạng invalidation `{type:"board", projectId, status}`, client tải lại cột | 2 |
+| Delta sync | `ZRANGEBYSCORE workspace-changes (sinceSeq +inf LIMIT 0 500` (không cắt đôi nhóm cùng seq, xem Delta sync) → `JSON.MGET` các entry entity → lọc theo quyền; entry `board:{p}:{status}` trả về dạng invalidation `{type:"board", projectId, status}`, client tải lại cột | 2 |
 | Admin list | `ZREVRANGEBYSCORE users-by-created` theo cursor | 2 |
 
 **Phân trang:** luôn dùng cursor opaque `(score, id)`, không offset; `limit` tối đa 100 (delta 500). Board không phân trang (mỗi cột ≤ 500 task theo giới hạn rebalance). Cursor theo rank của backlog hết hiệu lực khi cột bị rebalance: client nhận `rebalancedColumn` hoặc invalidation thì tải lại từ đầu.
@@ -321,6 +321,7 @@ Quyền luôn do server suy ra từ session và membership; client không bao gi
 - Token ngẫu nhiên 256-bit trong cookie `HttpOnly; Secure; SameSite=Lax`. Redis lưu `session:{sha256(token)}`, TTL trượt 7 ngày, tuyệt đối 30 ngày.
 - Đổi token khi login và khi đổi quyền. Không dùng JWT; không có `/auth/refresh` riêng (TTL trượt đã thay). Không cần `SESSION_SECRET` vì token là opaque và chỉ được hash.
 - Same-origin qua Next.js rewrite; mutation cần header CSRF. Mọi request kiểm tra `user.disabledAt`.
+- **Retry của auth không dùng cache response** (không lưu token phiên ở đâu ngoài `session:{sha256}`): register an toàn khi retry nhờ `user-email` unique trong Function (retry trả cùng response chung); login mỗi lần thành công tạo session mới, retry chỉ sinh thêm session có TTL; logout/logout-all gọi lại nhiều lần vẫn cùng kết quả. Rate limit vẫn áp cho mọi lần thử.
 - Register trả cùng một response dù email đã tồn tại hay chưa. Đổi mật khẩu (`POST /users/me/password`) cần mật khẩu cũ + sudo và thu hồi mọi session khác.
 
 **Tenant isolation:** xác thực actor → đọc entity, lấy `workspaceId` thật → kiểm tra membership → kiểm tra quyền → repository assert lại `workspaceId` (lớp thứ hai thay cho row-level security) → Function kiểm tra lần cuối. Không phải member thì `404`; là member nhưng thiếu quyền thì `403`.
@@ -338,6 +339,7 @@ Quyền luôn do server suy ra từ session và membership; client không bao gi
 **Platform Admin**
 
 - Quyền nằm ở `platform-admins` (SET), không nằm trong user JSON. Admin đầu tiên tạo bằng CLI `scripts/admin/grant.ts`; không có luồng “user đầu tiên thành admin”.
+- **CLI admin (P0, trước khi có console):** chạy trên VM qua SSH, kết nối Redis bằng user `sh-maint` (mật khẩu chỉ có trên VM). Lệnh: `grant`, `revoke`, `suspend`, `reactivate`, `revoke-sessions`, `registration on|off`. Mỗi lệnh nhận `--as <adminUserId>`; Function kiểm tra user đó có trong `platform-admins` (trừ `grant` lần đầu khi SET rỗng) và ghi `stream:audit` với actor `cli:<adminUserId>` + tên user hệ điều hành. Xác thực = quyền SSH vào VM; không có sudo vì không có session. Lệnh CLI idempotent theo bản chất (suspend user đã suspend là no-op), không cần `Idempotency-Key`. Suspend nhầm thì `reactivate`.
 - Admin API nằm ở repo `sprinthub-admin-service` (route `/admin-api/v1/*`), không nằm trong `sprinthub-be`. Mọi route qua guard Platform Admin; không phải admin thì `404`. Xem mục "Admin tách repo" bên dưới.
 - Hành động nhạy cảm cần sudo (nhập lại mật khẩu, hiệu lực 10 phút). Mọi request admin ghi `stream:audit`.
 - Gỡ admin cuối cùng bị từ chối trong Function (`409 LAST_PLATFORM_ADMIN`). Maintenance mode chặn mutation của user thường khi apply rebuild/migration.
@@ -368,6 +370,8 @@ Quyền luôn do server suy ra từ session và membership; client không bao gi
 
 Fixed window cho phép gấp đôi quanh biên cửa sổ; chấp nhận ở MVP, sliding window để P2.
 
+**Redis ACL không ép được “chỉ ghi qua Function”:** Redis kiểm ACL của user gọi `FCALL` cho cả các lệnh chạy bên trong Function, nên user được ghi qua Function cũng phải có quyền với các lệnh ghi đó. Quy tắc “ghi chỉ qua `FCALL`” của `sh-app`/`sh-admin-svc` vì vậy được bảo đảm bằng code (repository không có hàm ghi trực tiếp) và test, ACL chỉ thu hẹp key pattern và chặn lệnh nguy hiểm.
+
 **Redis ACL:** `sh-app` và `sh-worker` giới hạn trong `~sh:v1:*` và `-@dangerous`; `sh-maint` cho migration, rebuild và trim audit; `sh-admin-svc` cho `sprinthub-admin-service` (đọc `~sh:v1:*`, ghi chỉ qua `FCALL`); `sh-admin` chỉ dùng thủ công. Mục tiêu P1: `sh-app` chỉ ghi qua `FCALL` và không `XDEL`/`XTRIM` được `stream:audit` (xác minh cú pháp ACL selector trên bản đã pin).
 
 **Song ngữ EN/VI**
@@ -385,7 +389,7 @@ REST `/api/v1`. Contract gồm `contract.md` theo OpenSpec trong repo BE (cho ng
 | Nhóm | Endpoint chính |
 | --- | --- |
 | Auth | `POST /auth/register`, `/auth/login`, `/auth/logout`, `/auth/logout-all`, `/auth/sudo` |
-| User | `GET/PATCH /users/me` (chỉ `displayName`, `avatarUrl`), `POST /users/me/password`, `GET /users/me/sessions` |
+| User | `GET/PATCH /users/me` (chỉ `displayName`, `avatarUrl`, `locale`), `POST /users/me/password`, `GET /users/me/sessions` |
 | Workspace | `GET/POST /workspaces`, `GET/PATCH /workspaces/{wid}`, `GET/POST /workspaces/{wid}/members`, `PATCH/DELETE /workspaces/{wid}/members/{uid}`, `POST /workspaces/{wid}/leave`, `POST /workspaces/{wid}/transfer-ownership` |
 | Project | `GET/POST /workspaces/{wid}/projects`, `GET/PATCH /projects/{pid}` |
 | Task | `GET /projects/{pid}/board`, `GET/POST /projects/{pid}/tasks`, `GET/PATCH/DELETE /tasks/{tid}`, `PATCH /tasks/{tid}/move`, `/assignee`, `/sprint`, `/backlog-rank`, `PUT /tasks/{tid}/labels`, `GET /workspaces/{wid}/tasks/by-key/{key}` |
@@ -409,7 +413,7 @@ REST `/api/v1`. Contract gồm `contract.md` theo OpenSpec trong repo BE (cho ng
 | `429` | Rate limit, kèm `Retry-After` |
 | `503` | Redis không sẵn sàng, timeout (kết quả không rõ: client retry với cùng key), `MAINTENANCE` |
 
-Error envelope: `{ error: { code, message, details }, requestId }`; không trả stack trace, Redis key hay secret.
+Error envelope HTTP: `{ error: { code, params }, requestId }` (`code` + `params` để FE dịch; `message` tiếng Anh chỉ để debug, FE không hiển thị). Reply JSON `{ok, code, params}` của Function là hợp đồng nội bộ giữa repository và Function, API map sang envelope này. Không trả stack trace, Redis key hay secret.
 
 ## Realtime, Streams và delta sync
 
@@ -430,10 +434,10 @@ Lưu trước, đẩy sau: dữ liệu đã commit trong Function mới là sự
 **Worker (consumer group):**
 
 1. `XREADGROUP` nhận event.
-2. `SET processed:{group}:{eventId} NX` → đã xử lý rồi thì chỉ `XACK`.
-3. Tạo notification với ID tất định `notification:{userId}:{eventId}`; kiểm tra quyền người nhận tại thời điểm gửi.
+2. `EXISTS processed:{group}:{eventId}` → đã xử lý rồi thì chỉ `XACK`.
+3. Side effect idempotent, ghi dấu hoàn tất **cùng lúc**: một `FCALL` tạo notification với ID tất định `notification:{userId}:{eventId}` (`JSON.SET NX`, kiểm tra quyền người nhận tại thời điểm gửi) và `SET processed:{group}:{eventId} EX 604800` ở cuối. Crash trước Function thì lần giao lại làm lại; crash sau thì bước 2 bỏ qua. Không bao giờ ghi `processed` trước side effect.
 4. `XACK` sau khi xong. Crash trước ack thì `XAUTOCLAIM` lấy lại.
-5. Số lần giao > 3 thì `XADD stream:dead-letter` rồi `XACK`; admin xem và replay thủ công.
+5. Lần xử lý thứ 4 thất bại (đã giao và lỗi 3 lần trước đó) thì `XADD stream:dead-letter` rồi `XACK`; admin xem và replay thủ công.
 
 | Event | Người nhận notification |
 | --- | --- |
@@ -448,6 +452,7 @@ Notification chỉ lưu tham chiếu (taskId, loại, actor); title và quyền 
 
 1. Mọi mutation chạy `seq = INCR workspace-seq` và `ZADD workspace-changes seq "{type}:{id}"`. Mỗi entity chỉ chiếm một entry (seq mới nhất). Một mutation có thể ghi nhiều entry cùng seq (ví dụ `task:{id}` và `board:{p}:{status}` khi rebalance), nhưng chỉ phát **một** event, nên SSE dùng seq làm `id` vẫn duy nhất.
 2. Khi SSE rớt, trình duyệt tự kết nối lại và gửi `Last-Event-ID` = seq cuối đã nhận; server trả bù các thay đổi từ đó (đã lọc theo quyền hiện tại) ngay trên stream.
+2a. **Phân trang theo nhóm seq:** một trang delta không bao giờ cắt đôi các entry cùng seq. Server đọc `LIMIT 0 500`, nếu entry cuối có seq trùng seq kế tiếp thì đọc tiếp tới hết nhóm (hoặc bỏ cả nhóm cuối khỏi trang); `nextSinceSeq` = seq của nhóm cuối đã trả đủ. SSE chỉ ghi `id:` sau khi đã phát đủ nhóm.
 3. Cursor cũ hơn phần còn giữ trong `workspace-changes` thì server gửi event `resync`; client gọi `/changes` hoặc refetch toàn bộ (`410` nếu gọi `/changes`).
 4. `GET /workspaces/{wid}/changes?sinceSeq=` vẫn có cho tab vừa mở lại hoặc khi cần kéo theo trang.
 5. Tự reconnect của trình duyệt dùng giá trị `retry:` do server gửi (ngẫu nhiên 1–5 s) để mỗi lần deploy không thành bão reconnect. Khi shutdown, API đóng stream có kiểm soát. Mỗi lần deploy stream bị đứt là bình thường.
@@ -485,7 +490,7 @@ Mỗi lần gọi Function được ghi vào AOF thành một khối `MULTI`/`EX
 | Chủ đề | Thiết kế |
 | --- | --- |
 | RPO / RTO | Crash: theo kết quả đo (`always` = 0 với lệnh đã ACK, `everysec` khoảng 1 s, có thể tới \~2 s khi fsync chậm), khởi động lại < 1 phút. VM bị Oracle thu hồi: mất ≤ 24 h, dựng lại từ repo infra + backup trong 15–30 phút |
-| Backup | `BGSAVE` hằng ngày và trước mỗi deploy; RDB + thư mục AOF được **mã hóa rồi đẩy lên Cloudflare R2** (khác nhà cung cấp với Oracle); khóa mã hóa nằm trong GitHub Environment secrets, không nằm cạnh backup |
+| Backup | `BGSAVE` hằng ngày và trước mỗi deploy, chờ `LASTSAVE` đổi; **file RDB hoàn chỉnh** là artifact backup (không copy thư mục AOF đang chạy, vì copy lúc rewrite có thể ra bản hỏng), được **mã hóa rồi đẩy lên Cloudflare R2**; retention theo dung lượng đo được, dưới 10 GB free, cảnh báo ở 8 GB (khác nhà cung cấp với Oracle); khóa mã hóa nằm trong GitHub Environment secrets, không nằm cạnh backup |
 | Ghi sai | AOF chép lỗi một cách trung thành; khôi phục bằng `redis-check-aof --truncate-to-timestamp` hoặc backup ngày trước |
 | Restore drill | Chạy **trên VM prod**, khôi phục vào một Redis tạm (container riêng, port riêng), chạy verify-invariants rồi xóa. Hằng tuần và trước migration lớn; fail thì cảnh báo. Backup prod không bao giờ vào runner CI |
 | Capacity | VM 2 OCPU / 12 GB. Task \~1,5 KB, 10.000 task + comment + activity + index ≈ 100–150 MB (giả định, phải đo bằng `MEMORY USAGE`); `maxmemory` ≥ 2× dataset, còn dư cho fork và Redis tạm của restore drill |
@@ -512,10 +517,10 @@ Luồng **local → prod**, chi phí $0. Không có dev hay staging chạy lâu 
 | Bước | Ở đâu | Việc gì |
 | --- | --- | --- |
 | Phát triển | Local | Chạy từ source + Docker Compose, dữ liệu seed |
-| Merge `main` (BE/FE) | GitHub Actions | Lint, typecheck, unit, integration (mỗi job một Redis riêng), secret scan, build image **multi-arch** (amd64 + arm64) tag theo SHA, push GHCR, **tự mở PR** đổi tag ở `sprinthub-infra/envs/prod/image-tags.env` |
+| Merge `main` (BE/FE) | GitHub Actions | Lint, typecheck, unit, integration (mỗi job một Redis riêng), secret scan, build image **multi-arch** (amd64 + arm64) tag theo SHA, push GHCR, **tự mở PR** đổi tag ở `sprinthub-infra/envs/prod/image-tags.env` (`GITHUB_TOKEN` chỉ có quyền trong repo đang chạy, nên dùng fine-grained PAT hoặc GitHub App chỉ cấp `contents` + `pull-requests: write` trên `sprinthub-infra`, lưu ở secret của repo nguồn) |
 | Kiểm tra PR | GitHub Actions (tạm thời) | Dựng toàn bộ stack bằng compose với đúng các image đó, seed, chạy migration + `FUNCTION LOAD` + E2E Playwright (EN và VI), rồi xóa. Phải xanh mới được merge |
 | Thử tay | Local | `make prod-like SHA=<tag>` kéo đúng image từ GHCR và chạy bằng compose |
-| Deploy | Oracle Always Free VM (2 OCPU / 12 GB, Singapore) | Bạn duyệt tay PR trong GitHub Environment `production`, merge thì job deploy chạy |
+| Deploy | Oracle Always Free VM (2 OCPU / 12 GB, Singapore nếu home region của tenancy là Singapore và còn capacity: Always Free chỉ cấp ở home region) | Hai cửa tách nhau: CI xanh là điều kiện để **merge** PR đổi tag; bạn duyệt tay trong GitHub Environment `production` là điều kiện để job **deploy** chạy |
 
 - Caddy: TLS 1.3, HTTP/2, brotli, chứng chỉ tự gia hạn (ACME), HSTS; domain DuckDNS (mua domain riêng để P2). Redis không mở port ra Internet.
 - Secret (Redis ACL, khóa SSH deploy, khóa mã hóa backup, token DuckDNS) nằm trong GitHub Environment secrets; job deploy ghi ra `.env` trên VM. Chuyển sang SOPS + age khi số secret tăng (P2).
@@ -584,9 +589,9 @@ Mock Redis chỉ dùng cho unit test; concurrency, persistence, Search và ACL p
 | 010 | Idempotency ghi trong Function, `FCALL` không retry mù | Client phải luôn gửi key |
 | 011 | Luồng local → prod, chi phí $0: CI tạm thời thay staging, prod trên 1 VM Oracle Free, SSH + Compose, tag SHA trong `sprinthub-infra/envs/prod`; không Kubernetes/Argo CD. Đã cân nhắc: VPS DigitalOcean/Vultr, Render, k3s + Argo CD, 4 môi trường | Không có nơi chạy lâu dài trên dữ liệu gần thật; VM có thể bị thu hồi; vài giây downtime mỗi lần deploy |
 | 012 | Realtime bằng SSE thay WebSocket, `Last-Event-ID` = `seq` | Chỉ một chiều; muốn presence hai chiều thì dùng REST heartbeat hoặc đổi sau |
-| 013 | 3 repo, `sprinthub-be` làm trung tâm; contract = OpenSpec + OpenAPI sinh tự động | E2E phải kéo image từ nhiều repo, phải giữ contract đồng bộ |
+| 013 | Nhiều repo (v1.4: 5 repo), `sprinthub-be` làm trung tâm; contract = OpenSpec + OpenAPI sinh tự động | E2E phải kéo image từ nhiều repo, phải giữ contract đồng bộ |
 | 014 | Song ngữ EN/VI, BE trả `code` + `params`, FE dịch | FE giữ catalog 2 ngôn ngữ, E2E chạy cả hai |
-| 016 | Thứ tự chỉ nằm trong ZSET board/backlog; issue key tra qua HASH `workspace-task-keys` (v1.5) | Mất ZSET thì mất thứ tự (dựng lại theo `createdAtMs`); Search không sort theo vị trí |
+| 016 | Thứ tự chỉ nằm trong ZSET board/backlog; issue key tra qua HASH `workspace-task-keys` (v1.5) | Mất ZSET thì mất thứ tự kéo thả: rebuild theo `(createdAtMs, taskId)` chỉ cho thứ tự mặc định, muốn lấy lại thứ tự cũ phải restore backup còn ZSET; Search không sort theo vị trí |
 | 015 | Platform Admin tách 2 repo; admin-service đọc Redis trực tiếp nhưng **chỉ ghi qua Function** của library `sprinthub` (BE sở hữu) | Hai service cùng gọi library: phải version Function, giữ chữ ký tương thích ngược, deploy admin-service sau BE khi library đổi |
 
 Nghiên cứu, đối chiếu và nguồn: Nghiên cứu thiết kế
