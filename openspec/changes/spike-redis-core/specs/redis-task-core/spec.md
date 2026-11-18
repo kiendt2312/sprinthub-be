@@ -18,11 +18,16 @@ xuất hiện khi Function có bug.
 ### Requirement: KEYS phải khớp tenant thật
 Function SHALL dựng lại tên key từ ARGS và so với KEYS, rồi đọc project hoặc task thật
 và đối chiếu workspace và project với ARGS, trước khi kiểm tra quyền hay tra
-idempotency. Lệch SHALL trả `KEYS_MISMATCH` và không ghi gì.
+idempotency. Key idempotency SHALL được dựng lại từ `actorId` và `idempotencyKey` trong
+ARGS. Lệch SHALL trả `KEYS_MISMATCH` và không ghi gì.
 
 #### Scenario: Bộ key của workspace khác
 - **WHEN** actor là member của workspace A nhưng đã bị gỡ khỏi workspace B, và gọi create cho project thuộc B với `workspace-members` của A cùng `Idempotency-Key` đã dùng thành công ở B trước đó
 - **THEN** Function trả `KEYS_MISMATCH` hoặc `NOT_FOUND`, không trả lại response đã lưu và không ghi gì
+
+#### Scenario: Key idempotency của actor khác
+- **WHEN** actor A gọi create với KEYS chứa `idempotency:{B}:{key}` mà B đã dùng thành công
+- **THEN** Function trả `KEYS_MISMATCH`, không trả lại response của B và không ghi gì
 
 #### Scenario: Cột nguồn đã đổi
 - **WHEN** caller gọi move với `from` = TODO trong khi task đã ở IN_PROGRESS và chưa từng có lệnh nào với `Idempotency-Key` này
@@ -53,8 +58,12 @@ bất kỳ key nào.
 - **THEN** Function trả `NOT_FOUND` và snapshot mọi key của workspace không đổi
 
 #### Scenario: Project đã archive
-- **WHEN** member tạo task trong project có `archivedAt`
+- **WHEN** member tạo task mới trong project có `archivedAt`
 - **THEN** Function trả `PROJECT_ARCHIVED` và không ghi gì
+
+#### Scenario: Replay qua thời điểm archive
+- **WHEN** tạo task thành công, sau đó project bị archive, rồi client retry cùng `Idempotency-Key` và payload
+- **THEN** Function trả đúng response đã lưu, không trả `PROJECT_ARCHIVED` và không ghi gì thêm
 
 #### Scenario: Không gán và có gán
 - **WHEN** tạo một task không có assignee (slot `user-assigned:none`) và một task gán cho member X
@@ -141,8 +150,7 @@ chèn đầu là `min − 1024`, chèn giữa `a < b` là `floor((a + b) / 2)` k
 Khi `b − a < 2` hoặc score mới vượt `|2^50|` (kể cả create ở cuối cột), Function SHALL
 đánh số lại cả cột thành `i × 1024` giữ nguyên thứ tự rồi chèn, không đổi `version` của
 task khác, và vẫn phát đúng một event `TASK_MOVED` với `rebalancedColumn`; entry
-`board:{p}:{status}` SHALL được ghi vào `workspace-changes` cùng seq. Cột hơn 500 task
-SHALL nhận `BOARD_REBALANCE_REQUIRED` trước khi ghi.
+`board:{p}:{status}` SHALL được ghi vào `workspace-changes` cùng seq.
 
 #### Scenario: Hết khoảng trống
 - **WHEN** cột có hai task kề nhau với score 1024 và 1025, và một task được chèn vào giữa chúng
@@ -152,9 +160,22 @@ SHALL nhận `BOARD_REBALANCE_REQUIRED` trước khi ghi.
 - **WHEN** liên tục chèn task mới ngay dưới task vừa chèn trước đó (task neo trên là task vừa chèn, task neo dưới giữ nguyên) cho tới khi rebalance xảy ra ít nhất một lần
 - **THEN** rebalance xảy ra sau tối đa 11 lần chèn kể từ khoảng 1024, và sau mỗi lần chèn thứ tự ZSET khớp danh sách thứ tự mong đợi tính ở phía client, mọi score là số nguyên
 
-#### Scenario: Cột quá lớn
-- **WHEN** cần rebalance cột có 501 task
-- **THEN** Function trả `BOARD_REBALANCE_REQUIRED` và không ghi gì
+#### Scenario: Rebalance cột đầy
+- **WHEN** cột có đúng 500 task không còn khoảng trống ở chỗ chèn, và một task trong cột được reorder vào chỗ đó
+- **THEN** rebalance chạy ngay trong Function, thứ tự đúng và thời gian chạy được ghi vào số đo
+
+### Requirement: Giới hạn 500 task mỗi cột
+Trước lệnh ghi đầu tiên, Function SHALL tính kích thước cột đích sau thao tác: create và
+move sang cột khác tính thêm 1 task, reorder trong cùng cột giữ nguyên. Kích thước vượt
+500 SHALL trả `COLUMN_FULL` với `params.limit` = 500 và không ghi gì.
+
+#### Scenario: Task thứ 501
+- **WHEN** cột TODO có 500 task, rồi tạo task mới hoặc move một task từ cột khác vào TODO
+- **THEN** Function trả `COLUMN_FULL` với `params.limit` = 500 và không ghi gì; reorder trong TODO vẫn thành công
+
+#### Scenario: Tranh slot cuối
+- **WHEN** cột có 499 task và hai request tạo task vào cột đó chạy đồng thời trên hai kết nối
+- **THEN** đúng một request thành công, request còn lại nhận `COLUMN_FULL`, cột có đúng 500 task
 
 ### Requirement: Lỗi giữa Function bị phát hiện
 Function SHALL đọc và kiểm tra hết trước lệnh ghi đầu tiên. Khi lỗi runtime xảy ra sau

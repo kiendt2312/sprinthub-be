@@ -25,9 +25,9 @@ Các repo nằm cạnh nhau trong thư mục cha `SpirntHub/`. Chi tiết ở
 
 1. `openspec/specs/` — spec hiện hành; `openspec/changes/<change>/` — thay đổi đang làm
    (proposal, design, tasks, delta specs, `contract.md` nếu đụng API).
-2. `docs/design/design.md` — thiết kế chi tiết v1.6 (gốc xuất từ Claude Docs v1.3). Từ khi có
+2. `docs/design/design.md` — thiết kế chi tiết v1.7 (gốc xuất từ Claude Docs v1.3). Từ khi có
    code, **repo là bản gốc**; sửa thiết kế ở đây, không sửa ở Claude Docs.
-3. `docs/design/spec.md` — spec toàn dự án v1.6 (phạm vi, user stories, NFR, DoD).
+3. `docs/design/spec.md` — spec toàn dự án v1.7 (phạm vi, user stories, NFR, DoD).
 4. `docs/adr/` — quyết định kiến trúc (ADR-001 … ADR-016).
 
 ## Quy tắc bắt buộc
@@ -40,8 +40,8 @@ Các repo nằm cạnh nhau trong thư mục cha `SpirntHub/`. Chi tiết ở
   sớm để trả lỗi nhanh; Function mới quyết định.
 - **Key gốc `{entity}:{id}` không có sub-key**; index dùng type riêng có gạch nối
   (`project-tasks:{id}`, `task-comments:{id}`). Prefix `sh:v1:`.
-- **Không `KEYS`/`SCAN` trong request path.** Redis đơn luồng: mỗi Function < 5 ms,
-  đọc board ≤ 3 round trip (pipeline + `JSON.MGET`).
+- **Không `KEYS`/`SCAN` trong request path.** Redis đơn luồng: mỗi lần chạy Function < 5 ms,
+  đọc board ≤ 3 batch (pipeline + `JSON.GET` nhiều path).
 - **`FCALL` timeout = kết quả không rõ**: không retry mù mutation; trả `503` để client
   retry với cùng `Idempotency-Key`.
 - **Library Redis Functions `sprinthub` do repo này sở hữu**, kể cả Function admin. `sprinthub-admin-service` chỉ gọi `FCALL`; đổi chữ ký Function phải tương thích ngược và tăng `LIB_VERSION`.

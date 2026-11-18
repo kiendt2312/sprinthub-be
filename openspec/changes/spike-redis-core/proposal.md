@@ -14,7 +14,8 @@ số đo. Spike cũng chốt hai quyết định còn mở: bản Redis 8.x (ima
   - `sh_create_task`: issue key qua `workspace-task-keys`, idempotency, kiểm tra
     membership của actor và assignee trong Function, outbox tối thiểu.
   - `sh_move_task`: bảng chuyển trạng thái, `expectedVersion`, idempotency, kiểm tra
-    tenant và task neo, chèn trung điểm, rebalance cột ≤ 500 trong cùng một event.
+    tenant và task neo, chèn trung điểm, giới hạn cột 500 task (`COLUMN_FULL`),
+    rebalance cột ≤ 500 trong cùng một event.
   - `sh_remove_member`: bản tối giản, chỉ làm fixture cho kịch bản write skew.
 - Viết verifier offline bằng TypeScript (`verify-task-indexes`), không phải Function.
 - Chạy kịch bản song song, retry, lỗi giữa chừng và restart; đo latency Function,
@@ -40,7 +41,7 @@ số đo. Spike cũng chốt hai quyết định còn mở: bản Redis 8.x (ima
   library chính khi scaffold NestJS.
 - Phụ thuộc: Docker, image `redis:8.x` (pin digest ở task 1.2, trước mọi phép thử), Node 24, `redis`
   (node-redis), `tsx`.
-- Thiết kế đã lên v1.5 trước khi code (ADR-016: thứ tự chỉ nằm trong ZSET, HASH
+- Thiết kế đã lên v1.7 trước khi code (ADR-016: thứ tự chỉ nằm trong ZSET, HASH
   `workspace-task-keys`; quy ước chung cho Function ghi: đối chiếu KEYS với tenant thật,
   kiểm tra quyền trước khi replay, reply JSON, retry chỉ qua `Idempotency-Key`). Có thể sửa
   tiếp mục Persistence và ADR-005 nếu số đo khác giả định.

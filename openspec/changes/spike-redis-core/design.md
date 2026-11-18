@@ -1,6 +1,6 @@
 ## Context
 
-Thiết kế v1.6 (`docs/design/design.md`) đặt mọi thao tác ghi nhiều key vào Redis
+Thiết kế v1.7 (`docs/design/design.md`) đặt mọi thao tác ghi nhiều key vào Redis
 Functions và mọi điều kiện invariant vào trong Function (ADR-009, ADR-010). Chưa có
 dòng code nào chứng minh điều này chạy đúng và đủ nhanh trên Redis 8. Spike làm việc
 đó với phạm vi nhỏ nhất: workspace, project, task, board của một project.
@@ -20,16 +20,21 @@ dòng code nào chứng minh điều này chạy đúng và đủ nhanh trên Re
 - Mọi nhánh từ chối không ghi gì; lỗi sau khi đã ghi để lại phần ghi dở và bị phát hiện
   (verifier cho index, assertion riêng cho event và idempotency).
 - Rebalance giữ nguyên thứ tự, không đổi `version` của task khác, chỉ một event.
+- Cột không bao giờ vượt 500 task: task thứ 501 bị từ chối với `COLUMN_FULL`, kể cả khi
+  hai request tranh slot cuối.
 - Dữ liệu và library còn nguyên sau `docker restart`; sau `kill -9`, mỗi task phục hồi
   có đủ side effect; đo số ghi đã ACK bị mất với `everysec` và `always`.
-- Số đo: p50/p99/max thời gian chạy phía server mỗi Function, p99 phía client,
-  `MEMORY USAGE` của một task JSON và các index.
+- Số đo: thời gian chạy phía server mỗi Function, **max < 5 ms** trên workload nghiệm thu
+  (p50/p99 ghi để quan sát), p99 phía client, `MEMORY USAGE` của một task JSON và các
+  index.
 
 **Non-Goals:**
 - NestJS, HTTP, auth, SSE, UI, Search, Streams consumer, worker unassign, deploy.
 - `sh_assign_task` độc lập (membership của assignee đã kiểm tra qua create).
 - Label, sprint, backlog: spike không ghi `label-tasks`, `sprint-tasks`, `backlog`, nên
-  invariant 10 và 12 không được kiểm chứng ở đây.
+  invariant 10 và 12 không được kiểm chứng ở đây. Bỏ `backlog` **chỉ trong spike**:
+  proposal Create Task P0 bắt buộc ghi `backlog` ngay khi tạo task.
+- `BOARD_REBALANCE_REQUIRED` và job rebalance cột lớn (chỉ cần khi nâng giới hạn cột, P1).
 - Hiệu năng ở quy mô lớn (chỉ đo ở quy mô demo: vài nghìn task).
 - Mô phỏng mất điện cả máy (chỉ `kill -9` process).
 
@@ -48,10 +53,12 @@ dòng code nào chứng minh điều này chạy đúng và đủ nhanh trên Re
 
   | Function | KEYS | ARGS |
   | --- | --- | --- |
-  | `sh_create_task` | `workspace-members:{ws}`, `project:{p}`, `project-task-seq:{p}`, `workspace-task-keys:{ws}`, `task:{t}`, `project-tasks:{p}`, `board:{p}:TODO`, `user-assigned:{u}` (không gán: `user-assigned:none`, Function không đọc/ghi slot này), `workspace-seq:{ws}`, `workspace-changes:{ws}`, `stream:domain-events`, `idempotency:{actor}:{key}` | wsId, projectId, actorId, taskId, assigneeId hoặc rỗng, payload JSON, requestHash, clientMutationId, nowMs |
-  | `sh_move_task` | `workspace-members:{ws}`, `project:{p}`, `task:{t}`, `board:{p}:{from}`, `board:{p}:{to}`, `workspace-seq:{ws}`, `workspace-changes:{ws}`, `stream:domain-events`, `idempotency:{actor}:{key}` | wsId, projectId, taskId, actorId, from, to, afterTaskId, beforeTaskId, expectedVersion, requestHash, clientMutationId, nowMs |
+  | `sh_create_task` | `workspace-members:{ws}`, `project:{p}`, `project-task-seq:{p}`, `workspace-task-keys:{ws}`, `task:{t}`, `project-tasks:{p}`, `board:{p}:TODO`, `user-assigned:{u}` (không gán: `user-assigned:none`, Function không đọc/ghi slot này), `workspace-seq:{ws}`, `workspace-changes:{ws}`, `stream:domain-events`, `idempotency:{actor}:{key}` | wsId, projectId, actorId, taskId, assigneeId hoặc rỗng, payload JSON, idempotencyKey, requestHash, clientMutationId, nowMs |
+  | `sh_move_task` | `workspace-members:{ws}`, `project:{p}`, `task:{t}`, `board:{p}:{from}`, `board:{p}:{to}`, `workspace-seq:{ws}`, `workspace-changes:{ws}`, `stream:domain-events`, `idempotency:{actor}:{key}` | wsId, projectId, taskId, actorId, from, to, afterTaskId, beforeTaskId, expectedVersion, idempotencyKey, requestHash, clientMutationId, nowMs |
   | `sh_remove_member` | `workspace-members:{ws}`, `user-workspaces:{u}`, `workspace-seq:{ws}`, `workspace-changes:{ws}`, `stream:domain-events` | wsId, actorId, userId, nowMs |
 
+  Key idempotency cũng được dựng lại từ ARGS (`idempotency:{actorId}:{idempotencyKey}`)
+  và so với KEYS, nên caller không thể truyền key idempotency của actor khác.
 - **Thứ tự kiểm tra** (quy ước chung v1.5): KEYS khớp ARGS → đọc project/task thật,
   đối chiếu workspace/project (và `task.status == from` với move) → quyền actor trên
   workspace thật → tra idempotency, có thì replay → điều kiện nghiệp vụ → ghi → lưu
@@ -72,7 +79,7 @@ dòng code nào chứng minh điều này chạy đúng và đủ nhanh trên Re
   của Lua chỉ mang được một chuỗi, mất `params`). Mã: `KEYS_MISMATCH` (nội bộ),
   `NOT_FOUND`, `PROJECT_ARCHIVED`, `ASSIGNEE_NOT_MEMBER`, `IDEMPOTENCY_KEY_REUSED`,
   `TASK_VERSION_CONFLICT` (`params.currentVersion`), `INVALID_STATUS_TRANSITION`,
-  `INVALID_POSITION_ANCHOR`, `BOARD_REBALANCE_REQUIRED`.
+  `INVALID_POSITION_ANCHOR`, `COLUMN_FULL` (`params.limit` = 500).
 - **Event:** mỗi mutation được chấp nhận phát đúng một event (`TASK_CREATED`,
   `TASK_MOVED` có `rebalancedColumn` khi có rebalance, `MEMBER_REMOVED`) với một seq;
   rebalance ghi thêm entry `board:{p}:{status}` vào `workspace-changes` cùng seq.
@@ -86,8 +93,17 @@ dòng code nào chứng minh điều này chạy đúng và đủ nhanh trên Re
   trong `spikes/redis-core/scenarios/`, dùng dữ liệu riêng (workspace riêng), in kết
   quả dạng bảng và thoát mã khác 0 khi fail. Kịch bản song song dùng các kết nối riêng
   cho từng luồng, để auto-pipelining của node-redis không cố định thứ tự gửi.
-- **Dữ liệu:** seed 1 workspace, 1 project `SHAPI`, 3 member, tối đa 5.000 task để đo
-  bộ nhớ.
+- **Dữ liệu:** seed 1 workspace, project `SHAPI`, 3 member. Fixture đo bộ nhớ 5.000 task
+  chia 10 project × 500 task để tôn trọng giới hạn cột.
+- **Giới hạn cột (P0):** trước lệnh ghi đầu tiên, Function tính kích thước cột đích
+  *sau* thao tác: create và move sang cột khác tính thêm 1, reorder trong cùng cột giữ
+  nguyên; > 500 thì trả `COLUMN_FULL` và không ghi gì. Vì cột không vượt 500, rebalance
+  luôn chạy ngay trong Function.
+- **`PROJECT_ARCHIVED`** chỉ áp cho mutation nghiệp vụ **mới**: replay một mutation đã
+  thành công vẫn trả response đã lưu, vì bước tra idempotency đứng trước kiểm tra archive.
+- **Đọc task (nếu kịch bản cần đọc board):** `JSON.GET task:{id} $.workspaceId $.projectId
+  $.status $.isDeleted $.key $.title $.priority $.assigneeId $.dueAtMs $.labelIds
+  $.version`; mỗi path trả một mảng (`[null]` khi giá trị null, `[]` khi thiếu path).
 - **Đo latency:** phía server dùng `SLOWLOG` với `slowlog-log-slower-than 0` và
   `slowlog-max-len` đủ lớn trong lượt đo cô lập (mặc định chỉ ghi lệnh ≥ 10 ms); phía
   client đo quanh `FCALL` qua loopback, chỉ dùng để so hai mode fsync. Ghi rõ máy đo.
@@ -110,5 +126,5 @@ dòng code nào chứng minh điều này chạy đúng và đủ nhanh trên Re
   điều kiện bình thường, fsync chậm có thể kéo dài hơn.
 - Đo trên laptop khác VM Oracle arm64 → số đo chỉ để so sánh tương đối; đo lại trên
   VM khi deploy lần đầu.
-- Rebalance tốn hơn dự kiến → giới hạn cột ≤ 500 trong một Function; lớn hơn trả
-  `BOARD_REBALANCE_REQUIRED`, job batch thuộc change board.
+- Rebalance tốn hơn dự kiến → giới hạn cột 500 task (`COLUMN_FULL`), đo rebalance cột
+  500; nếu vượt 5 ms thì hạ giới hạn. Job rebalance cột lớn thuộc P1.

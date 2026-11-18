@@ -2,7 +2,7 @@
 
 Nov 18, 2026 · @Hieu Anh
 
-Bản thiết kế v1.6 (sau review spec dự án): auth và CLI admin không dùng cache response, CLI admin qua SSH với `sh-maint`, worker tạo notification rồi mới ghi `processed`, delta sync không cắt đôi nhóm cùng seq, backup là file RDB, envelope lỗi `{code, params}`, đọc board bằng pipeline `JSON.GET` nhiều path. v1.5 (sau 2 vòng review spec spike): thứ tự cột chỉ nằm trong ZSET (bỏ `position`/`backlogRank` khỏi JSON), issue key tra qua HASH `workspace-task-keys`, Function đối chiếu KEYS với tenant thật trước khi kiểm tra quyền và replay idempotency, retry chỉ dùng `Idempotency-Key`, reply Function dạng JSON `{ok, code, params}`, move kèm rebalance chỉ phát một event. v1.4: Platform Admin tách thành 2 repo riêng (`sprinthub-admin-ui`, `sprinthub-admin-service`). v1.3 giữ 6 lỗi P0 đã sửa ở v1.2, cập nhật theo buổi grilling 18/11/2026 (3 repo, SSE, song ngữ EN/VI, luồng local → prod trên Oracle Free, chi phí $0). Phần nghiên cứu và lý do nằm ở tab bên cạnh.
+Bản thiết kế v1.7 (sau review spec v1.6): cột tối đa 500 task kiểm trong Function (`COLUMN_FULL`), `PROJECT_ARCHIVED` chỉ chặn mutation mới, hợp đồng worker P0 (job bền, `XTRIM … ACKED`, DLQ tối thiểu), CLI admin lấy danh tính từ file ánh xạ trên VM, cookie đã thu hồi trả `SESSION_INVALID`, đọc board 3 batch có kiểm tenant. v1.6 (sau review spec dự án): auth và CLI admin không dùng cache response, CLI admin qua SSH với `sh-maint`, worker tạo notification rồi mới ghi `processed`, delta sync không cắt đôi nhóm cùng seq, backup là file RDB, envelope lỗi `{code, params}`, đọc board bằng pipeline `JSON.GET` nhiều path. v1.5 (sau 2 vòng review spec spike): thứ tự cột chỉ nằm trong ZSET (bỏ `position`/`backlogRank` khỏi JSON), issue key tra qua HASH `workspace-task-keys`, Function đối chiếu KEYS với tenant thật trước khi kiểm tra quyền và replay idempotency, retry chỉ dùng `Idempotency-Key`, reply Function dạng JSON `{ok, code, params}`, move kèm rebalance chỉ phát một event. v1.4: Platform Admin tách thành 2 repo riêng (`sprinthub-admin-ui`, `sprinthub-admin-service`). v1.3 giữ 6 lỗi P0 đã sửa ở v1.2, cập nhật theo buổi grilling 18/11/2026 (3 repo, SSE, song ngữ EN/VI, luồng local → prod trên Oracle Free, chi phí $0). Phần nghiên cứu và lý do nằm ở tab bên cạnh.
 
 ## Kiến trúc và phân lớp
 
@@ -15,7 +15,7 @@ Một monolith NestJS chia module theo nghiệp vụ, một worker cùng codebas
 | Application service | `CreateTask`, `MoveTask`, `AssignTask`, `CompleteSprint`, `SuspendUser`… | Gọi `JSON.SET`/`ZADD` trực tiếp |
 | Domain | Entity type, bảng chuyển trạng thái, thuật toán position, mã lỗi | Phụ thuộc Redis |
 | Repository | Key builder, đọc theo pipeline, `FCALL`, assert `entity.workspaceId === ctx.workspaceId` sau mỗi lần đọc | Ghi ngoài Function |
-| Redis Functions | Library `sprinthub` có `LIB_VERSION`: kiểm tra mọi điều kiện rồi mới ghi | Gọi mạng, chạy quá 5 ms |
+| Redis Functions | Library `sprinthub` có `LIB_VERSION`: kiểm tra mọi điều kiện rồi mới ghi | Gọi mạng, chạy quá 5 ms (mỗi lần chạy; đo bằng max trên workload nghiệm thu, p99 chỉ để quan sát) |
 
 Module nghiệp vụ: `auth`, `users`, `workspaces`, `projects`, `tasks`, `sprints`, `labels`, `comments`, `notifications`, `sync`. Admin API không nằm trong repo này (xem "Admin tách repo"); BE chỉ sở hữu các Function admin trong library.
 
@@ -99,7 +99,7 @@ JSON gốc là nguồn sự thật; mọi index phải dựng lại được t�
 | --- | --- | --- |
 | User | `email`, `emailNormalized`, `passwordHash` (Argon2id), `displayName`, `avatarUrl`, `disabledAt`, `suspendedBy`, `lastLoginAt` | Quyền Platform Admin **không** nằm ở đây; `passwordHash` không bao giờ ra API |
 | Workspace | `name`, `slug`, `ownerId`, `archivedAt`, `suspendedAt`, `suspendedBy` | Membership nằm ở HASH riêng |
-| Project | `workspaceId`, `name`, `key` (2–10 ký tự A–Z0–9), `description`, `createdBy`, `archivedAt` | Không đổi `key` khi đã có task (MVP). Archived: ẩn khỏi list mặc định (`?archived=true` để xem), mọi Function ghi vào project/task của nó trả `PROJECT_ARCHIVED`, đọc và permalink vẫn chạy; Admin unarchive được |
+| Project | `workspaceId`, `name`, `key` (2–10 ký tự A–Z0–9), `description`, `createdBy`, `archivedAt` | Không đổi `key` khi đã có task (MVP). Archived: ẩn khỏi list mặc định (`?archived=true` để xem); mutation nghiệp vụ **mới** của user vào project/task của nó trả `PROJECT_ARCHIVED`; đọc và permalink vẫn chạy. Ngoại lệ không bị chặn: unarchive (Owner/Admin), dọn dẹp hệ thống (worker unassign, admin repair), replay idempotency của mutation đã thành công (replay đứng trước kiểm tra archive) |
 | Sprint | `projectId`, `number`, `name`, `goal`, `status` (PLANNED/ACTIVE/COMPLETING/COMPLETED), `startAt(Ms)`, `endAt`, `completedSummary` | Tối đa 1 ACTIVE mỗi project |
 | Label | `projectId`, `name`, `color`, `deletedAt` | Tên unique trong project |
 | Comment | `taskId`, `authorId`, `body` (Markdown), `deletedAt` |  |
@@ -202,6 +202,7 @@ KEYS: workspace-members, project, project-task-seq, workspace-task-keys, task (i
 3. HGET workspace-members actor                                              → NOT_FOUND
 4. GET idempotency: cùng requestHash trả response cũ; khác hash               → IDEMPOTENCY_KEY_REUSED
 5. project chưa archive? task id chưa tồn tại? assignee (nếu có) là member?    → PROJECT_ARCHIVED / ASSIGNEE_NOT_MEMBER
+   ZCARD board:TODO + 1 ≤ 500?                                                  → COLUMN_FULL (params.limit = 500)
    label cùng project? sprint chưa COMPLETED?
    n = GET project-task-seq + 1; HEXISTS workspace-task-keys "{KEY}-{n}" phải = 0
    score = max(board:TODO) + 1024 (cột rỗng: 1024) phải ≤ 2^50, không thì rebalance trước
@@ -233,7 +234,9 @@ Thứ tự dùng số nguyên cách quãng `STEP = 1024`. Client gửi `afterTas
 
 - **Quy tắc task neo:** sau khi loại chính task đang move khỏi cột đích, hai task neo phải khác nhau, khác task đang move, có trong `board:{p}:{to}` và kề nhau (`ZRANK(before) = ZRANK(after) + 1`). Chỉ `afterTaskId`: nó phải là task cuối cột. Chỉ `beforeTaskId`: nó phải là task đầu cột. Không có task neo: chèn cuối cột. Sai thì `422 INVALID_POSITION_ANCHOR`, client tải lại cột. Reorder trong cùng cột dùng cùng quy tắc.
 - Cột rỗng: score `1024`. Chèn cuối: `max + 1024`. Chèn đầu: `min − 1024`. Chèn giữa `a < b`: `floor((a + b) / 2)` khi `b − a ≥ 2`.
-- Hết khoảng (`b − a < 2`) hoặc score mới vượt `|2^50|`: rebalance cả cột thành `i × 1024` theo thứ tự hiện tại rồi tính lại chỗ chèn, trong cùng Function nếu cột ≤ 500 task (con số này phải đo, vượt 5 ms thì hạ xuống). Cột lớn hơn: Function trả `409 BOARD_REBALANCE_REQUIRED` **trước khi ghi**; worker rebalance bằng job batch; client retry với **cùng** `Idempotency-Key` (lần trước không lưu gì) và không rollback như conflict.
+- Hết khoảng (`b − a < 2`) hoặc score mới vượt `|2^50|`: rebalance cả cột thành `i × 1024` theo thứ tự hiện tại rồi tính lại chỗ chèn, trong cùng Function (cột ≤ 500 task; con số này phải đo, vượt 5 ms thì hạ xuống).
+- **Giới hạn cột (P0):** số task của cột đích **sau** thao tác không được vượt 500 (create và move sang cột khác tính thêm 1, reorder cùng cột giữ nguyên); vượt thì `409 COLUMN_FULL` (`params.limit`) trước lệnh ghi đầu tiên. Client báo cho user, không retry.
+- **P1, chỉ khi nâng giới hạn cột:** cột lớn hơn giới hạn rebalance trong Function thì Function trả `409 BOARD_REBALANCE_REQUIRED` **trước khi ghi**; worker rebalance bằng job batch; client retry với **cùng** `Idempotency-Key` (lần trước không lưu gì) và không rollback như conflict.
 - Rebalance chỉ ghi ZSET board (vị trí không nằm trong JSON), nên không đổi `version` hay `lastSeq` của task nào khác. Move kèm rebalance vẫn là **một** mutation, **một** seq, **một** event `TASK_MOVED` có thêm `rebalancedColumn: "{status}"`; `workspace-changes` ghi `task:{id}` và `board:{p}:{status}` cùng seq. Client thấy `rebalancedColumn` thì tải lại cột đó, kể cả khi event đến từ chính tab của mình.
 - KEYS của move: `workspace-members`, `project`, `task`, `board:{p}:{from}`, `board:{p}:{to}`, `workspace-seq`, `workspace-changes`, `stream:domain-events`, `idempotency`. `from` do caller đọc từ task trước khi gọi. Task neo chỉ đọc bằng `ZSCORE`/`ZRANK` trên board đích: task đã xóa không còn trong board (invariant 7) nên thế là đủ; board bị hỏng là việc của verifier.
 
@@ -242,10 +245,10 @@ Thứ tự dùng số nguyên cách quãng `STEP = 1024`. Client gửi `afterTas
 1. KEYS khớp ARGS; task tồn tại, chưa xóa, `task.workspaceId`/`projectId` khớp ARGS và `task.status == from` (lệch: `KEYS_MISMATCH`; task không còn: `404 NOT_FOUND`).
 2. Actor là member của `task.workspaceId` (không: `404 NOT_FOUND`).
 3. Idempotency: cùng key + cùng hash trả response cũ; khác hash `422 IDEMPOTENCY_KEY_REUSED`.
-4. Project chưa archive (`422 PROJECT_ARCHIVED`).
+4. Project chưa archive (`422 PROJECT_ARCHIVED`; chỉ chặn mutation mới, replay ở bước 3 vẫn trả response cũ).
 5. `expectedVersion` khớp (sai: `409 TASK_VERSION_CONFLICT`, `params.currentVersion`).
 6. Chuyển trạng thái hợp lệ (`422 INVALID_STATUS_TRANSITION`).
-7. Task neo đúng quy tắc trên (`422 INVALID_POSITION_ANCHOR`); cột cần rebalance > 500 (`409 BOARD_REBALANCE_REQUIRED`).
+7. Task neo đúng quy tắc trên (`422 INVALID_POSITION_ANCHOR`); cột đích sau thao tác ≤ 500 task (`409 COLUMN_FULL`); P1 khi nâng giới hạn: cột cần rebalance quá lớn (`409 BOARD_REBALANCE_REQUIRED`).
 
 Mọi nhánh từ chối không ghi gì. Gửi lại nguyên lệnh đã thành công (vẫn mang `from` cũ): API đọc task, thấy `status` đã đổi nên truyền `from` mới; Function tới bước 3 và trả response cũ, không tăng version, seq hay event.
 
@@ -256,9 +259,10 @@ Trong cùng Function: `HGET workspace-members newAssignee` (không còn là memb
 ### Remove member và job batch
 
 1. Function: `HDEL workspace-members`, `SREM user-workspaces`, audit, event `MEMBER_REMOVED`. Quyền bị thu hồi ngay từ đây.
-2. Worker lấy lock `lock:unassign:{ws}:{user}` kèm `epoch = INCR fence:unassign:{ws}:{user}`.
-3. Mỗi batch 100 task gọi `FCALL` kèm epoch. Function từ chối epoch cũ (fencing) và **kiểm tra lại**: user vẫn không phải member và vẫn là assignee thì mới unassign. Nếu user đã được mời lại thì bỏ qua.
-4. Tiến độ lưu trong `job:{id}`; cảnh báo nếu job kẹt quá 15 phút.
+2. Worker nhận `MEMBER_REMOVED` → `JSON.SET job:{id} $ … NX` (id suy từ `eventId`, nên giao lại không tạo job thứ hai) → **rồi mới** `XACK`. Crash trước `JSON.SET` thì event được giao lại; crash sau thì job đã bền.
+3. Worker lấy lock `lock:unassign:{ws}:{user}` kèm `epoch = INCR fence:unassign:{ws}:{user}`; khởi động lại thì quét `job:*` chưa xong (ngoài request path) và chạy tiếp từ tiến độ đã lưu.
+4. Mỗi batch 100 task gọi `FCALL` kèm epoch. Function từ chối epoch cũ (fencing) và **kiểm tra lại** cho từng task: `task.workspaceId` đúng workspace của job (`user-assigned:{userId}` dùng chung mọi workspace nên phải lọc), user vẫn là assignee, user vẫn không phải member. Nếu user đã được mời lại thì bỏ qua.
+5. Tiến độ lưu trong `job:{id}`; cảnh báo nếu job kẹt quá 15 phút.
 
 Cùng mẫu áp dụng cho rebalance cột lớn, complete sprint (> 200 task), apply repair và trim stream.
 
@@ -284,8 +288,8 @@ Mỗi request đọc phải nằm trong ngân sách round trip cố định. Red
 
 | Màn hình | Cách đọc | Round trip |
 | --- | --- | --- |
-| Guard mọi request | Pipeline: `HGETALL session` + `INCR ratelimit` + `HGET workspace-members` | 1 |
-| Board | Pipeline 4×`ZRANGE` (×`ZINTER` khi có sprint) → pipeline `JSON.GET task:{id} $.key $.title $.priority $.assigneeId $.dueAtMs $.labelIds $.version` cho từng task, một batch mạng (`JSON.MGET` chỉ nhận một path nên không dùng ở đây; không lấy description) | 2 |
+| Guard mọi request | Pipeline: `HGETALL session` + `INCR ratelimit`; membership kiểm ở batch sau khi đã biết workspace thật | 1 |
+| Board | Batch 1: guard. Batch 2: `JSON.GET project:{p} $.workspaceId` + 4×`ZRANGE` (×`ZINTER` khi có sprint). Batch 3: `HGET workspace-members` + pipeline `JSON.GET task:{id} $.workspaceId $.projectId $.status $.isDeleted $.key $.title $.priority $.assigneeId $.dueAtMs $.labelIds $.version` cho từng task; không phải member thì không trả gì. Mỗi path trả một mảng (`[null]` khi giá trị null, `[]` khi thiếu path); task đã xóa, đã đổi cột hoặc khác tenant giữa hai batch thì bỏ qua. `JSON.MGET` chỉ nhận một path nên không dùng; không lấy description | 3 |
 | Chi tiết task | `JSON.GET` + `ZREVRANGE task-comments` + `task-activity` (pipeline) | 1–2 |
 | Backlog | `ZRANGE backlog` theo cursor → `JSON.MGET` | 2 |
 | Tra theo key | `HGET workspace-task-keys` → `JSON.GET` | 2 |
@@ -322,6 +326,7 @@ Quyền luôn do server suy ra từ session và membership; client không bao gi
 - Đổi token khi login và khi đổi quyền. Không dùng JWT; không có `/auth/refresh` riêng (TTL trượt đã thay). Không cần `SESSION_SECRET` vì token là opaque và chỉ được hash.
 - Same-origin qua Next.js rewrite; mutation cần header CSRF. Mọi request kiểm tra `user.disabledAt`.
 - **Retry của auth không dùng cache response** (không lưu token phiên ở đâu ngoài `session:{sha256}`): register an toàn khi retry nhờ `user-email` unique trong Function (retry trả cùng response chung); login mỗi lần thành công tạo session mới, retry chỉ sinh thêm session có TTL; logout/logout-all gọi lại nhiều lần vẫn cùng kết quả. Rate limit vẫn áp cho mọi lần thử.
+- Sau suspend, revoke hoặc logout-all, cookie cũ không còn ánh xạ tới user nên trả `401 SESSION_INVALID`. User đã suspend đăng nhập thì `401 USER_SUSPENDED`. Function tạo session kiểm `disabledAt` ngay bên trong, nên login không chạy chen được với suspend. Logout bằng session đã bị thu hồi vẫn trả `204`.
 - Register trả cùng một response dù email đã tồn tại hay chưa. Đổi mật khẩu (`POST /users/me/password`) cần mật khẩu cũ + sudo và thu hồi mọi session khác.
 
 **Tenant isolation:** xác thực actor → đọc entity, lấy `workspaceId` thật → kiểm tra membership → kiểm tra quyền → repository assert lại `workspaceId` (lớp thứ hai thay cho row-level security) → Function kiểm tra lần cuối. Không phải member thì `404`; là member nhưng thiếu quyền thì `403`.
@@ -339,7 +344,7 @@ Quyền luôn do server suy ra từ session và membership; client không bao gi
 **Platform Admin**
 
 - Quyền nằm ở `platform-admins` (SET), không nằm trong user JSON. Admin đầu tiên tạo bằng CLI `scripts/admin/grant.ts`; không có luồng “user đầu tiên thành admin”.
-- **CLI admin (P0, trước khi có console):** chạy trên VM qua SSH, kết nối Redis bằng user `sh-maint` (mật khẩu chỉ có trên VM). Lệnh: `grant`, `revoke`, `suspend`, `reactivate`, `revoke-sessions`, `registration on|off`. Mỗi lệnh nhận `--as <adminUserId>`; Function kiểm tra user đó có trong `platform-admins` (trừ `grant` lần đầu khi SET rỗng) và ghi `stream:audit` với actor `cli:<adminUserId>` + tên user hệ điều hành. Xác thực = quyền SSH vào VM; không có sudo vì không có session. Lệnh CLI idempotent theo bản chất (suspend user đã suspend là no-op), không cần `Idempotency-Key`. Suspend nhầm thì `reactivate`.
+- **CLI admin (P0, trước khi có console):** chạy trên VM qua SSH, kết nối Redis bằng user `sh-maint` (mật khẩu chỉ có trên VM). Lệnh: `grant`, `revoke`, `suspend`, `reactivate`, `revoke-sessions`, `registration on|off`. **Không có `--as`:** danh tính operator lấy từ file ánh xạ do root sở hữu trên VM (`/etc/sprinthub/cli-operators.json`, user hệ điều hành → `adminUserId`); Compose ở local dùng `.env.local`. Function kiểm tra `adminUserId` có trong `platform-admins` **và** còn active (không `disabledAt`) (trừ `grant` lần đầu khi SET rỗng), ghi `stream:audit` với actor `cli:<adminUserId>` + tên user hệ điều hành. `revoke`/`suspend` không được làm mất admin active cuối cùng (`LAST_PLATFORM_ADMIN`, T-015 chạy từ P0). Xác thực = quyền SSH vào VM; không có sudo vì không có session. Lệnh CLI idempotent theo bản chất (suspend user đã suspend là no-op), không cần `Idempotency-Key`. Suspend nhầm thì `reactivate`.
 - Admin API nằm ở repo `sprinthub-admin-service` (route `/admin-api/v1/*`), không nằm trong `sprinthub-be`. Mọi route qua guard Platform Admin; không phải admin thì `404`. Xem mục "Admin tách repo" bên dưới.
 - Hành động nhạy cảm cần sudo (nhập lại mật khẩu, hiệu lực 10 phút). Mọi request admin ghi `stream:audit`.
 - Gỡ admin cuối cùng bị từ chối trong Function (`409 LAST_PLATFORM_ADMIN`). Maintenance mode chặn mutation của user thường khi apply rebuild/migration.
@@ -352,7 +357,7 @@ Quyền luôn do server suy ra từ session và membership; client không bao gi
 | Admin API | `sprinthub-admin-service` | NestJS, prefix `/admin-api/v1`, guard Platform Admin, sudo, audit |
 | Library Function | `sprinthub-be` | Sở hữu library `sprinthub`, kể cả các Function admin (`sh_suspend_user`, `sh_grant_admin`, `sh_revoke_admin`, `sh_set_platform_setting`, `sh_transfer_owner`, job verify/rebuild) |
 
-- **Ghi chỉ qua Function.** `sprinthub-admin-service` dùng Redis user `sh-admin-svc`: đọc trực tiếp các key cần cho màn hình (user, workspace, index `*-by-created`, `INFO`, `XINFO`, `FT.INFO`), nhưng mọi thao tác ghi gọi `FCALL` tới library do BE sở hữu. Invariant chỉ được giữ ở một chỗ (ADR-009, ADR-015).
+- **Ghi chỉ qua Function.** `sprinthub-admin-service` dùng Redis user `sh-admin-svc`: chỉ đọc trực tiếp key metadata cần cho màn hình (`user:*`, `users-by-created`, `workspace:*`, `workspaces-by-created`, `workspace-members:*`, `platform-*`, `stream:audit`, `job:*`) cùng `INFO`, `XINFO`, `FT.INFO`; không đọc key task/comment, nhưng mọi thao tác ghi gọi `FCALL` tới library do BE sở hữu. Invariant chỉ được giữ ở một chỗ (ADR-009, ADR-015).
 - **Đề xuất cho phần đăng nhập (cần xác nhận khi làm P1):** cùng domain, phân đường dẫn bằng Caddy: `/admin` → admin-ui, `/admin-api/*` → admin-service. Admin đăng nhập bằng luồng login của `sprinthub-be` (dùng chung cookie session), admin-service đọc `session:*` và kiểm tra `platform-admins` trước mọi request.
 - **Version library:** library có `LIB_VERSION`; admin-service kiểm tra version lúc khởi động (readiness fail nếu không khớp). Khi library đổi, deploy BE trước, admin-service sau.
 - **Deploy:** thêm 2 image (`admin-ui`, `admin-service`) vào `sprinthub-infra/envs/prod/image-tags.env`, cùng luồng PR + kiểm tra tạm như các image khác.
@@ -372,7 +377,7 @@ Fixed window cho phép gấp đôi quanh biên cửa sổ; chấp nhận ở MVP
 
 **Redis ACL không ép được “chỉ ghi qua Function”:** Redis kiểm ACL của user gọi `FCALL` cho cả các lệnh chạy bên trong Function, nên user được ghi qua Function cũng phải có quyền với các lệnh ghi đó. Quy tắc “ghi chỉ qua `FCALL`” của `sh-app`/`sh-admin-svc` vì vậy được bảo đảm bằng code (repository không có hàm ghi trực tiếp) và test, ACL chỉ thu hẹp key pattern và chặn lệnh nguy hiểm.
 
-**Redis ACL:** `sh-app` và `sh-worker` giới hạn trong `~sh:v1:*` và `-@dangerous`; `sh-maint` cho migration, rebuild và trim audit; `sh-admin-svc` cho `sprinthub-admin-service` (đọc `~sh:v1:*`, ghi chỉ qua `FCALL`); `sh-admin` chỉ dùng thủ công. Mục tiêu P1: `sh-app` chỉ ghi qua `FCALL` và không `XDEL`/`XTRIM` được `stream:audit` (xác minh cú pháp ACL selector trên bản đã pin).
+**Redis ACL:** `sh-app` và `sh-worker` giới hạn trong `~sh:v1:*` và `-@dangerous`; `sh-maint` cho migration, rebuild và trim audit; `sh-admin-svc` cho `sprinthub-admin-service` (đọc chỉ các key metadata liệt kê ở mục Admin tách repo, ghi chỉ qua `FCALL`); `sh-admin` chỉ dùng thủ công. Mục tiêu P1: `sh-app` chỉ ghi qua `FCALL` và không `XDEL`/`XTRIM` được `stream:audit` (xác minh cú pháp ACL selector trên bản đã pin).
 
 **Song ngữ EN/VI**
 
@@ -397,23 +402,23 @@ REST `/api/v1`. Contract gồm `contract.md` theo OpenSpec trong repo BE (cho ng
 | Khác | `GET /projects/{pid}/search`, `/stats`, `GET/POST /tasks/{tid}/comments`, `GET /tasks/{tid}/activity`, `GET /notifications`, `PATCH /notifications/{nid}/read`, `GET /workspaces/{wid}/changes?sinceSeq=` |
 | Admin (thuộc `sprinthub-admin-service`, prefix `/admin-api/v1`) | `/users`, `/users/{uid}/suspend\|reactivate\|revoke-sessions`, `/workspaces`, `/platform-admins`, `/settings`, `/health`, `/jobs`, `/audit` |
 
-**Header:** mọi PATCH bắt buộc `expectedVersion` trong body. Mutation bắt buộc `Idempotency-Key` và `X-Client-Mutation-Id`. Response kèm `seq`, `requestId` và `Server-Timing`.
+**Header:** mọi PATCH bắt buộc `expectedVersion` trong body. Mutation nghiệp vụ bắt buộc `Idempotency-Key` và `X-Client-Mutation-Id`; auth (`/auth/*`) và CLI được miễn (xem Retry của auth). Response kèm `seq`, `requestId` và `Server-Timing`.
 
 **Cache:** `/api/*` và mọi trang SSR có đăng nhập trả `Cache-Control: no-store`. Chỉ asset có hash được `public, max-age=31536000, immutable`.
 
 | Mã | Khi nào |
 | --- | --- |
 | `400` / `422` | Sai cấu trúc / sai nghiệp vụ: `INVALID_STATUS_TRANSITION`, `IDEMPOTENCY_KEY_REUSED`, `INVALID_POSITION_ANCHOR`, `PROJECT_ARCHIVED`, `ASSIGNEE_NOT_MEMBER` |
-| `401` | Thiếu session, `USER_SUSPENDED` |
+| `401` | Thiếu session; `SESSION_INVALID` (cookie đã bị thu hồi do logout-all, suspend hoặc revoke); `USER_SUSPENDED` (user đã suspend đăng nhập) |
 | `403` | Member thiếu quyền, `SUDO_REQUIRED`, `REGISTRATION_DISABLED` |
 | `404` | Không tồn tại **hoặc** không phải member; route admin khi không phải admin |
-| `409` | `TASK_VERSION_CONFLICT` (kèm `currentVersion`), `SPRINT_ALREADY_ACTIVE`, `LAST_PLATFORM_ADMIN`, `BOARD_REBALANCE_REQUIRED` (retry sau khi job rebalance xong) |
+| `409` | `TASK_VERSION_CONFLICT` (kèm `currentVersion`), `COLUMN_FULL` (kèm `limit`), `SPRINT_ALREADY_ACTIVE`, `LAST_PLATFORM_ADMIN`, `BOARD_REBALANCE_REQUIRED` (P1, retry sau khi job rebalance xong) |
 | `410` | `SYNC_CURSOR_EXPIRED` |
 | `423` | `WORKSPACE_SUSPENDED` |
 | `429` | Rate limit, kèm `Retry-After` |
 | `503` | Redis không sẵn sàng, timeout (kết quả không rõ: client retry với cùng key), `MAINTENANCE` |
 
-Error envelope HTTP: `{ error: { code, params }, requestId }` (`code` + `params` để FE dịch; `message` tiếng Anh chỉ để debug, FE không hiển thị). Reply JSON `{ok, code, params}` của Function là hợp đồng nội bộ giữa repository và Function, API map sang envelope này. Không trả stack trace, Redis key hay secret.
+Error envelope HTTP: `{ error: { code, params }, requestId }` (`code` + `params` để FE dịch). Thông điệp debug chỉ nằm trong log, gắn theo `requestId`, không có trong body. Reply JSON `{ok, code, params}` của Function là hợp đồng nội bộ giữa repository và Function, API map sang envelope này. Không trả stack trace, Redis key hay secret.
 
 ## Realtime, Streams và delta sync
 
@@ -433,11 +438,12 @@ Lưu trước, đẩy sau: dữ liệu đã commit trong Function mới là sự
 
 **Worker (consumer group):**
 
+0. Group được tạo lúc bootstrap: `XGROUP CREATE stream:domain-events {group} $ MKSTREAM` (bỏ qua lỗi `BUSYGROUP`). Group P0 là `unassign`; group `notify` có từ P1. Event group không quan tâm thì `XACK` ngay.
 1. `XREADGROUP` nhận event.
 2. `EXISTS processed:{group}:{eventId}` → đã xử lý rồi thì chỉ `XACK`.
 3. Side effect idempotent, ghi dấu hoàn tất **cùng lúc**: một `FCALL` tạo notification với ID tất định `notification:{userId}:{eventId}` (`JSON.SET NX`, kiểm tra quyền người nhận tại thời điểm gửi) và `SET processed:{group}:{eventId} EX 604800` ở cuối. Crash trước Function thì lần giao lại làm lại; crash sau thì bước 2 bỏ qua. Không bao giờ ghi `processed` trước side effect.
 4. `XACK` sau khi xong. Crash trước ack thì `XAUTOCLAIM` lấy lại.
-5. Lần xử lý thứ 4 thất bại (đã giao và lỗi 3 lần trước đó) thì `XADD stream:dead-letter` rồi `XACK`; admin xem và replay thủ công.
+5. Lần xử lý thứ 4 thất bại (đã giao và lỗi 3 lần trước đó) thì `SET processed:dlq:{eventId} NX` → chỉ khi set được mới `XADD stream:dead-letter` (chống trùng khi crash giữa `XADD` và `XACK`), ghi log, rồi `XACK`. DLQ tối thiểu này có từ P0; xem và replay trên console ở P1.
 
 | Event | Người nhận notification |
 | --- | --- |
@@ -459,13 +465,13 @@ Notification chỉ lưu tham chiếu (taskId, loại, actor); title và quyền 
 
 | Dữ liệu | Retention |
 | --- | --- |
-| `stream:domain-events` | `XTRIM MINID` 7 ngày, chỉ phần mọi group đã ACK |
+| `stream:domain-events` | `XTRIM stream:domain-events MINID ~ <ID của 7 ngày trước> ACKED`: giữ entry còn pending ở bất kỳ group nào (`XTRIM MINID` thường không bảo đảm điều này). Worker chạy từ P0 |
 | `workspace-changes` | 10.000 entry hoặc 7 ngày |
 | Activity | Không TTL |
 | `stream:audit` | 180 ngày |
 | Notification đã đọc | 90 ngày |
 
-**Chuỗi rủi ro cần canh:** worker chết → stream không được trim → RAM tăng → `noeviction` từ chối ghi → **mọi mutation hỏng** (vì `XADD` nằm trong mọi Function). Cảnh báo khi event pending cũ nhất quá 10 phút, khi consumer lag vượt ngưỡng, và khi dead-letter có entry.
+**Chuỗi rủi ro cần canh:** worker chết → stream không được trim → RAM tăng → `noeviction` từ chối ghi → **mọi mutation hỏng** (vì `XADD` nằm trong mọi Function). Cảnh báo khi event pending cũ nhất quá 10 phút (tuổi = timestamp trong ID của entry pending nhỏ nhất ở `XPENDING` dạng tóm tắt, không phải idle time), khi consumer lag vượt ngưỡng, và khi dead-letter có entry.
 
 ## Persistence, backup, Redis client và deploy
 
@@ -524,7 +530,7 @@ Luồng **local → prod**, chi phí $0. Không có dev hay staging chạy lâu 
 
 - Caddy: TLS 1.3, HTTP/2, brotli, chứng chỉ tự gia hạn (ACME), HSTS; domain DuckDNS (mua domain riêng để P2). Redis không mở port ra Internet.
 - Secret (Redis ACL, khóa SSH deploy, khóa mã hóa backup, token DuckDNS) nằm trong GitHub Environment secrets; job deploy ghi ra `.env` trên VM. Chuyển sang SOPS + age khi số secret tăng (P2).
-- Quan sát: log JSON qua `docker logs`, trang health của admin console, một dịch vụ uptime check miễn phí ping `/health/ready`, cron trên VM cảnh báo khi Redis vượt 70% RAM, backup thất bại, hoặc event pending cũ hơn 10 phút. Grafana/Sentry để P2.
+- Quan sát: log JSON qua `docker logs`, trang health của admin console, một dịch vụ uptime check miễn phí ping `/health/ready`, cron trên VM cảnh báo khi Redis vượt 70% `maxmemory`, backup thất bại, hoặc event pending cũ hơn 10 phút. Grafana/Sentry để P2.
 - Health: `/health/live` và `/health/ready`; graceful shutdown xả request đang chạy và đóng stream SSE có kiểm soát.
 - Oracle dùng gói Free thuần (không nâng Pay-As-You-Go). VM có thể bị thu hồi khi rảnh: dựng lại bằng cloud-init + repo infra + backup R2, thử quy trình này ít nhất một lần. Dự phòng khi Oracle hết máy: máy nhà + Cloudflare Tunnel.
 
@@ -573,7 +579,7 @@ Mock Redis chỉ dùng cho unit test; concurrency, persistence, Search và ACL p
 | T-018 | Description chứa `<script>` | Không chạy script |
 | T-019 | Redis `maxmemory` rất nhỏ | API trả `503` có kiểm soát |
 | T-020 | Index bị làm hỏng có chủ đích | Verify phát hiện, rebuild sửa được |
-| T-021 | Đọc board 200 task | ≤ 2 round trip Redis |
+| T-021 | Đọc board 200 task | ≤ 3 batch Redis (guard, project + ZRANGE, membership + JSON.GET) |
 
 | ADR | Quyết định | Giá phải trả |
 | --- | --- | --- |
