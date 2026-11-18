@@ -21,3 +21,4 @@ quyết định cần thảo luận dài hơn.
 | 013 | Nhiều repo, `sprinthub-be` làm trung tâm; contract OpenSpec + OpenAPI | Chấp nhận |
 | 014 | Song ngữ EN/VI, BE trả `code` + `params` | Chấp nhận |
 | 015 | Platform Admin tách 2 repo; admin-service ghi chỉ qua Function của BE | Chấp nhận |
+| 016 | Thứ tự chỉ nằm trong ZSET board/backlog; issue key qua HASH `workspace-task-keys` | Chấp nhận |

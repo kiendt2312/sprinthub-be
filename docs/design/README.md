@@ -2,7 +2,7 @@
 
 | File | Nội dung |
 | --- | --- |
-| [design.md](design.md) | Thiết kế chi tiết v1.4 (thêm admin tách repo): kiến trúc, keyspace, entity, invariants, luồng nghiệp vụ, query, auth/admin, API, realtime SSE, persistence/deploy, testing, ADR |
+| [design.md](design.md) | Thiết kế chi tiết v1.5 (v1.4: admin tách repo; v1.5: sửa sau review spec spike): kiến trúc, keyspace, entity, invariants, luồng nghiệp vụ, query, auth/admin, API, realtime SSE, persistence/deploy, testing, ADR |
 
 Bản gốc ban đầu nằm trên Claude Docs (xuất ngày 18/11/2026):
 

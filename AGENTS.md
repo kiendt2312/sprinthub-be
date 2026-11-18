@@ -25,9 +25,9 @@ Các repo nằm cạnh nhau trong thư mục cha `SpirntHub/`. Chi tiết ở
 
 1. `openspec/specs/` — spec hiện hành; `openspec/changes/<change>/` — thay đổi đang làm
    (proposal, design, tasks, delta specs, `contract.md` nếu đụng API).
-2. `docs/design/design.md` — thiết kế chi tiết v1.3 (xuất từ Claude Docs). Từ khi có
+2. `docs/design/design.md` — thiết kế chi tiết v1.5 (gốc xuất từ Claude Docs v1.3). Từ khi có
    code, **repo là bản gốc**; sửa thiết kế ở đây, không sửa ở Claude Docs.
-3. `docs/adr/` — quyết định kiến trúc (ADR-001 … ADR-015).
+3. `docs/adr/` — quyết định kiến trúc (ADR-001 … ADR-016).
 
 ## Quy tắc bắt buộc
 

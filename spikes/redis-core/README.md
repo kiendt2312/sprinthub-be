@@ -9,7 +9,7 @@ Kết quả sẽ ghi vào `REPORT.md`.
 ## Chạy
 
 ```bash
-docker compose up -d        # Redis 8 + volume ./data
+docker compose up -d   # Redis 8 + volume ./data
 docker compose exec redis redis-cli PING
 ```
 
