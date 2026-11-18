@@ -1,9 +1,9 @@
 ## 1. Môi trường spike
 
-- [ ] 1.1 `spikes/redis-core/compose.yaml`: Redis 8.x có volume, `redis.conf` (AOF bật, `noeviction`, `maxmemory` nhỏ; comment luôn ở dòng riêng)
-- [ ] 1.2 Chọn bản Redis 8.x ổn định mới nhất, pin image digest trong `compose.yaml` **trước** mọi phép thử và ghi vào `REPORT.md`
-- [ ] 1.3 `package.json` tối thiểu (node-redis, tsx, typescript), key builder có prefix `sh:v1:`, helper decode reply JSON của Function, script `seed`
-- [ ] 1.4 Kiểm tra trên Redis thật: `docker compose up`, `PING`, `CONFIG GET appendonly appendfsync aof-timestamp-enabled aof-load-truncated maxmemory-policy` đúng giá trị, `JSON.SET`/`JSON.GET` round trip, `FUNCTION LIST` chạy được
+- [x] 1.1 `spikes/redis-core/compose.yaml`: Redis 8.x có volume, `redis.conf` (AOF bật, `noeviction`, `maxmemory` nhỏ; comment luôn ở dòng riêng)
+- [x] 1.2 Chọn bản Redis 8.x ổn định mới nhất, pin image digest trong `compose.yaml` **trước** mọi phép thử và ghi vào `REPORT.md`
+- [x] 1.3 `package.json` tối thiểu (node-redis, tsx, typescript), key builder có prefix `sh:v1:`, helper decode reply JSON của Function, script `seed`
+- [x] 1.4 Kiểm tra trên Redis thật: `docker compose up`, `PING`, `CONFIG GET appendonly appendfsync aof-timestamp-enabled aof-load-truncated maxmemory-policy` đúng giá trị, `JSON.SET`/`JSON.GET` round trip, `FUNCTION LIST` chạy được
 
 ## 2. Library Functions `sprinthub` (bản spike) và verifier
 
