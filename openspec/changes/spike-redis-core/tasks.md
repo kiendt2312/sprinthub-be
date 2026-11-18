@@ -7,12 +7,12 @@
 
 ## 2. Library Functions `sprinthub` (bản spike) và verifier
 
-- [ ] 2.1 Helper Lua dùng chung: dựng key từ ARGS (gồm `idempotency:{actorId}:{idempotencyKey}`) và so với KEYS (`KEYS_MISMATCH`), reply JSON `{ok, code, params}`, tra/lưu idempotency, kiểm giới hạn cột 500 (`COLUMN_FULL`)
-- [ ] 2.2 `sh_create_task` theo chữ ký và thứ tự kiểm tra trong `design.md`: KEYS → project thật → quyền → idempotency → archive/taskId/assignee/`n = seq + 1` và `HEXISTS` đúng field/biên score/giới hạn cột 500 → ghi `project-task-seq`, `workspace-task-keys`, JSON (không `position`), `project-tasks`, `board:{p}:TODO`, `user-assigned` (bỏ qua slot `none`), `workspace-seq`, `workspace-changes`, `XADD TASK_CREATED`, idempotency ở cuối (invariant 3, 4, 6, 8, 9, 13, 17)
-- [ ] 2.3 `sh_move_task` theo chữ ký và thứ tự kiểm tra trong `design.md`: KEYS → task thật và `status == from` → quyền → idempotency → archive → `expectedVersion` → bảng chuyển trạng thái → quy tắc task neo → chèn cột rỗng/đầu/cuối/giữa; giới hạn cột 500 sau thao tác (`COLUMN_FULL`); rebalance trong cùng mutation, một event `TASK_MOVED` có `rebalancedColumn`, entry `board:{p}:{status}` cùng seq (invariant 4, 5, 8, 13, 17)
-- [ ] 2.4 `sh_remove_member` tối giản: KEYS → quyền → idempotency → `HDEL workspace-members`, `SREM user-workspaces`, seq, `workspace-changes`, event `MEMBER_REMOVED`, lưu idempotency; gửi lại cùng key chỉ một event (invariant 3, 8, 13, 17)
-- [ ] 2.5 Verifier TypeScript `verify-task-indexes` chạy offline: `SCAN task:*` → index và index → JSON; báo missing/orphan/duplicate/wrong-pointer/bad-score cho `project-tasks`, board ZSET, `workspace-task-keys` (invariant 4, 5, 9)
-- [ ] 2.6 Kiểm tra trên Redis thật: `FUNCTION LOAD REPLACE`, gọi từng Function với dữ liệu seed cho mỗi mã lỗi và decode được `params`, verifier báo sạch
+- [x] 2.1 Helper Lua dùng chung: dựng key từ ARGS (gồm `idempotency:{actorId}:{idempotencyKey}`) và so với KEYS (`KEYS_MISMATCH`), reply JSON `{ok, code, params}`, tra/lưu idempotency, kiểm giới hạn cột 500 (`COLUMN_FULL`)
+- [x] 2.2 `sh_create_task` theo chữ ký và thứ tự kiểm tra trong `design.md`: KEYS → project thật → quyền → idempotency → archive/taskId/assignee/`n = seq + 1` và `HEXISTS` đúng field/biên score/giới hạn cột 500 → ghi `project-task-seq`, `workspace-task-keys`, JSON (không `position`), `project-tasks`, `board:{p}:TODO`, `user-assigned` (bỏ qua slot `none`), `workspace-seq`, `workspace-changes`, `XADD TASK_CREATED`, idempotency ở cuối (invariant 3, 4, 6, 8, 9, 13, 17)
+- [x] 2.3 `sh_move_task` theo chữ ký và thứ tự kiểm tra trong `design.md`: KEYS → task thật và `status == from` → quyền → idempotency → archive → `expectedVersion` → bảng chuyển trạng thái → quy tắc task neo → chèn cột rỗng/đầu/cuối/giữa; giới hạn cột 500 sau thao tác (`COLUMN_FULL`); rebalance trong cùng mutation, một event `TASK_MOVED` có `rebalancedColumn`, entry `board:{p}:{status}` cùng seq (invariant 4, 5, 8, 13, 17)
+- [x] 2.4 `sh_remove_member` tối giản: KEYS → quyền → idempotency → `HDEL workspace-members`, `SREM user-workspaces`, seq, `workspace-changes`, event `MEMBER_REMOVED`, lưu idempotency; gửi lại cùng key chỉ một event (invariant 3, 8, 13, 17)
+- [x] 2.5 Verifier TypeScript `verify-task-indexes` chạy offline: `SCAN task:*` → index và index → JSON; báo missing/orphan/duplicate/wrong-pointer/bad-score cho `project-tasks`, board ZSET, `workspace-task-keys` (invariant 4, 5, 9)
+- [x] 2.6 Kiểm tra trên Redis thật: `FUNCTION LOAD REPLACE`, gọi từng Function với dữ liệu seed cho mỗi mã lỗi và decode được `params`, verifier báo sạch
 
 ## 3. Kịch bản chứng minh
 

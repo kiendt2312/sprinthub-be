@@ -8,8 +8,10 @@
   },
   "scripts": {
     "seed": "tsx src/seed.ts",
+    "load": "tsx src/load.ts",
     "smoke": "tsx src/smoke.ts",
-    "test": "vitest run"
+    "test": "vitest run",
+    "verify": "tsx src/verify-task-indexes.ts"
   },
   "dependencies": {
     "redis": "6.3.1"

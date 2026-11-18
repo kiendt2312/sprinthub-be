@@ -30,3 +30,32 @@ chế độ fsync, đo latency và bộ nhớ thuộc nhóm 4.
   `[null]` cho giá trị null và `[]` cho path thiếu.
 - Vitest qua 13 test. TypeScript `tsc --noEmit` và OpenSpec `validate --strict`
   đều thành công.
+
+## Kiểm tra nhóm 2
+
+- `pnpm load` nạp `sprinthub` phiên bản 1. `pnpm smoke` báo một library
+  trong `FUNCTION LIST` và các kiểm tra Redis đều qua.
+- Vitest qua 42 test, gồm 29 integration test trên Redis 8.10.3. Kiểm tra
+  snapshot của các nhánh từ chối gồm giá trị key và thời điểm hết hạn tuyệt đối.
+- `pnpm verify` trên seed trả `ok: true` với danh sách phát hiện rỗng. Thử một
+  entry board mồ côi có score 1.5 trả `orphan` và `bad-score`; mã thoát lần
+  lượt là 1 theo mặc định và 0 với `--report-only`.
+- TypeScript `tsc --noEmit` và OpenSpec `validate --strict` đều thành công.
+
+## Các điểm cần thống nhất sau nhóm 2
+
+- Kịch bản 3.2 kỳ vọng `TASK_VERSION_CONFLICT` ở request thua. Theo thứ tự kiểm
+  tra trong thiết kế, FCALL thua gửi `from=TODO` nhận `KEYS_MISMATCH` trước. Khi
+  caller đọc lại `from=IN_PROGRESS` và giữ `expectedVersion` cũ, Function trả
+  `TASK_VERSION_CONFLICT` cùng `params.currentVersion`. Kịch bản 3.3 cũng cần
+  đọc lại `from` trước khi replay.
+- Thiết kế yêu cầu từ chối khi ID task do caller sinh đã tồn tại hoặc field
+  issue key kế tiếp đã bị chiếm. Spike xem đây là lỗi dữ liệu nội bộ, trả lỗi
+  giao thức Redis trước lệnh ghi đầu tiên. Danh sách chín mã lỗi nghiệp vụ áp
+  dụng cho các trường hợp đã có mã trong thiết kế.
+- Chữ ký spike chỉ truyền `clientMutationId` cho create/move, trong khi
+  envelope ở thiết kế tổng có cả `requestId`. Stream spike dùng
+  `eventId = workspaceId:seq` và các field có trong chữ ký. Remove Member áp
+  bảng quyền Owner/Admin và ghi delta `member:{userId}`.
+- Verifier giữ mapping issue key của task soft-delete theo invariant 9.
+  Invariant 7 áp dụng cho index active `project-tasks` và `board`.
