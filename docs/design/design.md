@@ -2,7 +2,7 @@
 
 Nov 18, 2026 · @Hieu Anh
 
-Bản thiết kế v1.5: thứ tự cột chỉ nằm trong ZSET (bỏ `position`/`backlogRank` khỏi JSON), issue key tra qua HASH `workspace-task-keys`, idempotency kiểm tra quyền trước khi replay (sau review spec spike). v1.4: Platform Admin tách thành 2 repo riêng (`sprinthub-admin-ui`, `sprinthub-admin-service`). v1.3 giữ 6 lỗi P0 đã sửa ở v1.2, cập nhật theo buổi grilling 18/11/2026 (3 repo, SSE, song ngữ EN/VI, luồng local → prod trên Oracle Free, chi phí $0). Phần nghiên cứu và lý do nằm ở tab bên cạnh.
+Bản thiết kế v1.5 (sau 2 vòng review spec spike): thứ tự cột chỉ nằm trong ZSET (bỏ `position`/`backlogRank` khỏi JSON), issue key tra qua HASH `workspace-task-keys`, Function đối chiếu KEYS với tenant thật trước khi kiểm tra quyền và replay idempotency, retry chỉ dùng `Idempotency-Key`, reply Function dạng JSON `{ok, code, params}`, move kèm rebalance chỉ phát một event. v1.4: Platform Admin tách thành 2 repo riêng (`sprinthub-admin-ui`, `sprinthub-admin-service`). v1.3 giữ 6 lỗi P0 đã sửa ở v1.2, cập nhật theo buổi grilling 18/11/2026 (3 repo, SSE, song ngữ EN/VI, luồng local → prod trên Oracle Free, chi phí $0). Phần nghiên cứu và lý do nằm ở tab bên cạnh.
 
 ## Kiến trúc và phân lớp
 
@@ -137,7 +137,7 @@ JSON gốc là nguồn sự thật; mọi index phải dựng lại được t�
 
 - `assigneeIndexValue` = `assigneeId` hoặc `"UNASSIGNED"`, vì Search TAG không xử lý `null` gọn.
 - `isDeleted` là bản TAG của `deletedAt`, ghi cùng lúc.
-- `lastClientMutationId` (mới ở v1.2): retry mang cùng id thì trả `200` với state hiện tại thay vì `409`.
+- `lastClientMutationId`: chỉ để tab nhận ra event của chính mình. Từ v1.5, retry **không** dựa vào trường này (ULID của tab không chứng minh được ai gửi); retry dùng `Idempotency-Key`.
 - `description` và `comment.body` là Markdown, tối đa 20.000 ký tự; server lưu nguyên văn, FE render có sanitize.
 
 ## Invariants và chiến lược nhất quán
@@ -169,7 +169,7 @@ Redis không có foreign key, nên 19 điều dưới đây là “ràng buộc�
 | Đồng bộ | Một Function: kiểm tra điều kiện → ghi JSON + index → `INCR workspace-seq` → `ZADD workspace-changes` → `XADD` event → lưu idempotency. `XADD` trong cùng Function chính là transactional outbox |
 | Bất đồng bộ | Worker xử lý at-least-once, mọi side effect idempotent |
 | Sửa chữa | Verify (dry-run) → báo cáo missing/orphan/wrong-score → apply trong maintenance mode |
-| Retry | `Idempotency-Key` bắt buộc cho create và cho mutation do mutation queue gửi lại |
+| Retry | `Idempotency-Key` bắt buộc cho mọi mutation ghi qua Function; đây là cơ chế retry duy nhất |
 
 **Atomic không có nghĩa là rollback.** Function không bị client khác xen ngang, nhưng nếu lỗi giữa chừng thì các lệnh đã chạy vẫn còn. Vì vậy Function đọc và kiểm tra mọi thứ trước lệnh ghi đầu tiên, không gọi mạng, và có test lỗi runtime giữa chừng.
 
@@ -184,29 +184,39 @@ Redis không có foreign key, nên 19 điều dưới đây là “ràng buộc�
 
 Mỗi luồng ghi là một `FCALL`. Function tự kiểm tra quyền, version và idempotency rồi mới ghi, nên API chỉ còn việc validate DTO và dịch mã lỗi.
 
+**Quy ước chung cho mọi Function ghi** (v1.5):
+
+- **Reply:** luôn trả một chuỗi JSON: `{"ok":true,"data":…,"seq":…}` hoặc `{"ok":false,"code":"TASK_VERSION_CONFLICT","params":{"currentVersion":7}}`. Lỗi giao thức Redis (`redis.error_reply`, lỗi Lua) chỉ dành cho bug, vì reply lỗi của Lua chỉ mang được một chuỗi, không mang `params`.
+- **Thứ tự kiểm tra:** (1) dựng lại tên key từ ARGS và so với KEYS, lệch thì `KEYS_MISMATCH` → (2) đọc entity thật (project, task) và đối chiếu workspace/project với ARGS → (3) kiểm tra quyền actor trên workspace thật → (4) tra idempotency, có thì replay → (5) kiểm tra điều kiện nghiệp vụ → ghi → (6) lưu idempotency ở cuối. Replay đứng sau kiểm tra quyền nên actor đã bị gỡ không lấy lại được response cũ; đứng trước điều kiện nghiệp vụ nên gửi lại nguyên lệnh đã thành công vẫn nhận đúng response cũ.
+- **`KEYS_MISMATCH`** là mã nội bộ: caller đã đọc dữ liệu cũ (ví dụ `status` vừa đổi) nên truyền sai key. API đọc lại và gọi lại tối đa 2 lần; không có gì được ghi nên an toàn, và mã này không ra tới client.
+- **`requestHash`** = sha256 của tên thao tác + đích + payload do client gửi đã chuẩn hóa; không gồm giá trị caller tự đọc (`from`) hay `nowMs`.
+
 ### Create task (`sh_create_task`)
 
 ```text
 KEYS: workspace-members, project, project-task-seq, workspace-task-keys, task (id do API sinh),
-      project-tasks, board:{p}:TODO, backlog, user-assigned (nếu có assignee), label-tasks...,
-      workspace-seq, workspace-changes, stream:domain-events, idempotency
-1. HGET workspace-members actor → không phải member: NOT_FOUND (kiểm tra quyền TRƯỚC khi replay)
-2. GET idempotency → có rồi: cùng requestHash trả response cũ, khác hash trả IDEMPOTENCY_KEY_REUSED
-3. project tồn tại, cùng workspace, chưa archive? task id chưa tồn tại? assignee (nếu có) là member?
-   label cùng project? sprint chưa COMPLETED? field "{KEY}-{seq+1}" chưa có trong workspace-task-keys?
+      project-tasks, board:{p}:TODO, user-assigned:{u} (không gán: user-assigned:none, không chạm tới),
+      label-tasks..., backlog, workspace-seq, workspace-changes, stream:domain-events, idempotency
+1. KEYS khớp ARGS (wsId, projectId, taskId, assigneeId, actorId, key)?        → KEYS_MISMATCH
+2. project tồn tại và project.workspaceId == wsId?                            → NOT_FOUND
+3. HGET workspace-members actor                                              → NOT_FOUND
+4. GET idempotency: cùng requestHash trả response cũ; khác hash               → IDEMPOTENCY_KEY_REUSED
+5. project chưa archive? task id chưa tồn tại? assignee (nếu có) là member?    → PROJECT_ARCHIVED / ASSIGNEE_NOT_MEMBER
+   label cùng project? sprint chưa COMPLETED?
+   n = GET project-task-seq + 1; HEXISTS workspace-task-keys "{KEY}-{n}" phải = 0
+   score = max(board:TODO) + 1024 (cột rỗng: 1024) phải ≤ 2^50, không thì rebalance trước
    --- chưa có lệnh ghi nào trước dòng này ---
-4. n = INCR project-task-seq; HSETNX workspace-task-keys "{KEY}-{n}" taskId
-5. seq = INCR workspace-seq
-6. JSON.SET task (number, key, version 1, lastSeq seq)
-7. SADD project-tasks; ZADD board:TODO (max + 1024); SADD user-assigned; SADD label-tasks; ZADD backlog | SADD sprint-tasks
-8. ZADD workspace-changes; XADD stream:domain-events (seq, clientMutationId, requestId, eventVersion)
-9. SET idempotency {requestHash, response} EX 86400
+6. INCR project-task-seq (= n); HSETNX workspace-task-keys "{KEY}-{n}" taskId
+7. seq = INCR workspace-seq
+8. JSON.SET task (number, key, version 1, lastSeq seq)
+9. SADD project-tasks; ZADD board:TODO score; SADD user-assigned; SADD label-tasks; ZADD backlog | SADD sprint-tasks
+10. ZADD workspace-changes seq "task:{id}"; XADD stream:domain-events TASK_CREATED (seq, clientMutationId, requestId, eventVersion)
+11. SET idempotency {requestHash, response} EX 86400
 ```
 
-- `requestHash` = sha256 của tên thao tác + đích (projectId) + payload đã chuẩn hóa. Key idempotency theo actor nên actor khác dùng trùng key không đụng nhau.
-- Ghi idempotency ở bước cuối: Function đã kiểm tra hết trước lệnh ghi đầu tiên, nên lỗi sau bước 4 chỉ có thể là bug (hoặc OOM, nhưng với `noeviction` Redis từ chối Function có ghi ngay từ đầu). Lỗi như vậy trả `500`, không retry tự động, verifier phát hiện phần ghi dở.
-
-Số `n` có thể bị bỏ qua nếu Function lỗi sau bước 4; không hứa số liên tục.
+- Key idempotency theo actor (`idempotency:{actorId}:{key}`) nên actor khác dùng trùng key không đụng nhau.
+- Lỗi sau lệnh ghi đầu tiên chỉ có thể là bug (OOM không tính: với `noeviction` Redis từ chối Function có ghi ngay từ đầu). Redis **không** rollback: phần đã ghi vẫn còn và vẫn vào AOF. Lỗi như vậy trả `500`, không retry tự động; verifier phát hiện thiếu index, test riêng kiểm thiếu event và idempotency.
+- Rebuild sau sự cố phải giữ high-water mark của `project-task-seq` (`max(number)` không đủ nếu task cuối đã xóa), để số không bị tái sử dụng.
 
 ### Move / reorder (`sh_move_task`)
 
@@ -219,24 +229,25 @@ Trạng thái cố định, chỉ các cạnh sau hợp lệ (sai thì `422 INVA
 | IN\_REVIEW | DONE, IN\_PROGRESS |
 | DONE | IN\_PROGRESS |
 
-Thứ tự dùng số nguyên cách quãng `STEP = 1024`:
+Thứ tự dùng số nguyên cách quãng `STEP = 1024`. Client gửi `afterTaskId` (task ngay phía trên chỗ thả) và/hoặc `beforeTaskId` (task ngay phía dưới):
 
-- Chèn cuối cột: `max + 1024`. Chèn đầu cột: `min − 1024`.
-- Chèn giữa `a < b`: `floor((a + b) / 2)` khi `b − a ≥ 2`.
-- Hết khoảng (`b − a < 2`) hoặc `|x| > 2^50`: rebalance cả cột thành `i × 1024` theo thứ tự hiện tại, trong cùng Function nếu cột ≤ 500 task (con số này phải đo, vượt 5 ms thì hạ xuống). Cột lớn hơn: Function trả `BOARD_REBALANCE_REQUIRED` **trước khi ghi**, worker rebalance bằng job batch rồi client retry.
-- Rebalance chỉ ghi ZSET board (vị trí không nằm trong JSON), nên **không** đổi `version` hay `lastSeq` của task nào; Function tăng `workspace-seq`, ghi `workspace-changes` cho `board:{p}:{status}` và phát một event `BOARD_REBALANCED` để client tải lại cột.
-- KEYS của move: `workspace-members`, `task`, `board:{p}:{from}`, `board:{p}:{to}`, `workspace-seq`, `workspace-changes`, `stream:domain-events`, `idempotency`. Task neo chỉ đọc bằng `ZSCORE` trên board đích nên không cần khai báo `task:{anchorId}`.
+- **Quy tắc task neo:** sau khi loại chính task đang move khỏi cột đích, hai task neo phải khác nhau, khác task đang move, có trong `board:{p}:{to}` và kề nhau (`ZRANK(before) = ZRANK(after) + 1`). Chỉ `afterTaskId`: nó phải là task cuối cột. Chỉ `beforeTaskId`: nó phải là task đầu cột. Không có task neo: chèn cuối cột. Sai thì `422 INVALID_POSITION_ANCHOR`, client tải lại cột. Reorder trong cùng cột dùng cùng quy tắc.
+- Cột rỗng: score `1024`. Chèn cuối: `max + 1024`. Chèn đầu: `min − 1024`. Chèn giữa `a < b`: `floor((a + b) / 2)` khi `b − a ≥ 2`.
+- Hết khoảng (`b − a < 2`) hoặc score mới vượt `|2^50|`: rebalance cả cột thành `i × 1024` theo thứ tự hiện tại rồi tính lại chỗ chèn, trong cùng Function nếu cột ≤ 500 task (con số này phải đo, vượt 5 ms thì hạ xuống). Cột lớn hơn: Function trả `409 BOARD_REBALANCE_REQUIRED` **trước khi ghi**; worker rebalance bằng job batch; client retry với **cùng** `Idempotency-Key` (lần trước không lưu gì) và không rollback như conflict.
+- Rebalance chỉ ghi ZSET board (vị trí không nằm trong JSON), nên không đổi `version` hay `lastSeq` của task nào khác. Move kèm rebalance vẫn là **một** mutation, **một** seq, **một** event `TASK_MOVED` có thêm `rebalancedColumn: "{status}"`; `workspace-changes` ghi `task:{id}` và `board:{p}:{status}` cùng seq. Client thấy `rebalancedColumn` thì tải lại cột đó, kể cả khi event đến từ chính tab của mình.
+- KEYS của move: `workspace-members`, `project`, `task`, `board:{p}:{from}`, `board:{p}:{to}`, `workspace-seq`, `workspace-changes`, `stream:domain-events`, `idempotency`. `from` do caller đọc từ task trước khi gọi. Task neo chỉ đọc bằng `ZSCORE`/`ZRANK` trên board đích: task đã xóa không còn trong board (invariant 7) nên thế là đủ; board bị hỏng là việc của verifier.
 
-Điều kiện trong Function:
+Điều kiện trong Function, theo thứ tự chung:
 
-1. Actor là member của `task.workspaceId` (không phải: `404 NOT_FOUND`).
-2. Task tồn tại và chưa xóa (không: `404 NOT_FOUND`); project của task chưa archive (`422 PROJECT_ARCHIVED`).
+1. KEYS khớp ARGS; task tồn tại, chưa xóa, `task.workspaceId`/`projectId` khớp ARGS và `task.status == from` (lệch: `KEYS_MISMATCH`; task không còn: `404 NOT_FOUND`).
+2. Actor là member của `task.workspaceId` (không: `404 NOT_FOUND`).
 3. Idempotency: cùng key + cùng hash trả response cũ; khác hash `422 IDEMPOTENCY_KEY_REUSED`.
-4. `expectedVersion` khớp, hoặc `clientMutationId == lastClientMutationId` (retry của chính mình: trả `200` với state hiện tại; `clientMutationId` là ULID sinh theo tab nên không trùng giữa actor). Sai: `409 TASK_VERSION_CONFLICT` kèm `currentVersion`.
-5. Chuyển trạng thái hợp lệ (`422 INVALID_STATUS_TRANSITION`).
-6. `beforeTaskId`/`afterTaskId` phải có score trong `board:{p}:{to}` (tức cùng project, cùng cột đích, chưa xóa); không thì `422 INVALID_POSITION_ANCHOR`.
+4. Project chưa archive (`422 PROJECT_ARCHIVED`).
+5. `expectedVersion` khớp (sai: `409 TASK_VERSION_CONFLICT`, `params.currentVersion`).
+6. Chuyển trạng thái hợp lệ (`422 INVALID_STATUS_TRANSITION`).
+7. Task neo đúng quy tắc trên (`422 INVALID_POSITION_ANCHOR`); cột cần rebalance > 500 (`409 BOARD_REBALANCE_REQUIRED`).
 
-Mọi nhánh từ chối không ghi gì.
+Mọi nhánh từ chối không ghi gì. Gửi lại nguyên lệnh đã thành công (vẫn mang `from` cũ): API đọc task, thấy `status` đã đổi nên truyền `from` mới; Function tới bước 3 và trả response cũ, không tăng version, seq hay event.
 
 ### Assign (`sh_assign_task`)
 
@@ -261,10 +272,11 @@ Cùng mẫu áp dụng cho rebalance cột lớn, complete sprint (> 200 task), 
 
 1. Mỗi task có một hàng đợi riêng; mỗi task chỉ có tối đa 1 request đang bay.
 2. UI optimistic ngay. Mutation sau chờ và lấy `expectedVersion` từ response của mutation trước; nhiều move đang chờ thì gộp thành trạng thái cuối.
-3. Mỗi mutation có `X-Client-Mutation-Id` và `Idempotency-Key`. Event quay về mang id của chính tab thì bỏ qua.
+3. Mỗi mutation có `X-Client-Mutation-Id` và `Idempotency-Key`. Event quay về mang id của chính tab thì bỏ phần patch task, nhưng vẫn xử lý `rebalancedColumn`.
 4. **Chỉ áp** dữ liệu từ server khi `version` ≥ bản local; bỏ event có `seq ≤ lastSeq`.
 5. Gặp `409` do người khác: xóa các mutation phía sau của task đó, rollback, refetch, báo cho user.
 6. Gặp `503` hoặc timeout: retry với **cùng** key, backoff 200 → 400 → 800 ms có jitter, tối đa 3 lần.
+7. Gặp `409 BOARD_REBALANCE_REQUIRED`: giữ optimistic, chờ event rebalance của cột hoặc 1 s rồi retry cùng key; không rollback.
 
 ## Query, Search và phân trang
 
@@ -279,10 +291,10 @@ Mỗi request đọc phải nằm trong ngân sách round trip cố định. Red
 | Tra theo key | `HGET workspace-task-keys` → `JSON.GET` | 2 |
 | Filter label | `SINTER label-tasks:A label-tasks:B` giao với board/backlog | 2 |
 | Dashboard | `ZCARD` mỗi cột (pipeline) | 1 |
-| Delta sync | `ZRANGEBYSCORE workspace-changes (sinceSeq +inf LIMIT 0 500` → `JSON.MGET` → lọc theo quyền | 2 |
+| Delta sync | `ZRANGEBYSCORE workspace-changes (sinceSeq +inf LIMIT 0 500` → `JSON.MGET` các entry entity → lọc theo quyền; entry `board:{p}:{status}` trả về dạng invalidation `{type:"board", projectId, status}`, client tải lại cột | 2 |
 | Admin list | `ZREVRANGEBYSCORE users-by-created` theo cursor | 2 |
 
-**Phân trang:** luôn dùng cursor opaque `(score, id)`, không offset; `limit` tối đa 100 (delta 500).
+**Phân trang:** luôn dùng cursor opaque `(score, id)`, không offset; `limit` tối đa 100 (delta 500). Board không phân trang (mỗi cột ≤ 500 task theo giới hạn rebalance). Cursor theo rank của backlog hết hiệu lực khi cột bị rebalance: client nhận `rebalancedColumn` hoặc invalidation thì tải lại từ đầu.
 
 **Redis Search** (P1) index trên task JSON, tên có version để đổi schema bằng alias:
 
@@ -381,7 +393,7 @@ REST `/api/v1`. Contract gồm `contract.md` theo OpenSpec trong repo BE (cho ng
 | Khác | `GET /projects/{pid}/search`, `/stats`, `GET/POST /tasks/{tid}/comments`, `GET /tasks/{tid}/activity`, `GET /notifications`, `PATCH /notifications/{nid}/read`, `GET /workspaces/{wid}/changes?sinceSeq=` |
 | Admin (thuộc `sprinthub-admin-service`, prefix `/admin-api/v1`) | `/users`, `/users/{uid}/suspend\|reactivate\|revoke-sessions`, `/workspaces`, `/platform-admins`, `/settings`, `/health`, `/jobs`, `/audit` |
 
-**Header:** mọi PATCH bắt buộc `expectedVersion` trong body. Mutation nhận `Idempotency-Key` (bắt buộc cho create và cho mutation do queue gửi lại) và `X-Client-Mutation-Id`. Response kèm `seq`, `requestId` và `Server-Timing`.
+**Header:** mọi PATCH bắt buộc `expectedVersion` trong body. Mutation bắt buộc `Idempotency-Key` và `X-Client-Mutation-Id`. Response kèm `seq`, `requestId` và `Server-Timing`.
 
 **Cache:** `/api/*` và mọi trang SSR có đăng nhập trả `Cache-Control: no-store`. Chỉ asset có hash được `public, max-age=31536000, immutable`.
 
@@ -434,7 +446,7 @@ Notification chỉ lưu tham chiếu (taskId, loại, actor); title và quyền 
 
 **Delta sync:**
 
-1. Mọi mutation chạy `seq = INCR workspace-seq` và `ZADD workspace-changes seq "{type}:{id}"`. Mỗi entity chỉ chiếm một entry (seq mới nhất).
+1. Mọi mutation chạy `seq = INCR workspace-seq` và `ZADD workspace-changes seq "{type}:{id}"`. Mỗi entity chỉ chiếm một entry (seq mới nhất). Một mutation có thể ghi nhiều entry cùng seq (ví dụ `task:{id}` và `board:{p}:{status}` khi rebalance), nhưng chỉ phát **một** event, nên SSE dùng seq làm `id` vẫn duy nhất.
 2. Khi SSE rớt, trình duyệt tự kết nối lại và gửi `Last-Event-ID` = seq cuối đã nhận; server trả bù các thay đổi từ đó (đã lọc theo quyền hiện tại) ngay trên stream.
 3. Cursor cũ hơn phần còn giữ trong `workspace-changes` thì server gửi event `resync`; client gọi `/changes` hoặc refetch toàn bộ (`410` nếu gọi `/changes`).
 4. `GET /workspaces/{wid}/changes?sinceSeq=` vẫn có cho tab vừa mở lại hoặc khi cần kéo theo trang.
@@ -468,9 +480,11 @@ maxmemory-policy noeviction
 
 `noeviction` là bắt buộc vì đây là database, không phải cache: LRU sẽ âm thầm xóa dữ liệu nghiệp vụ.
 
+Mỗi lần gọi Function được ghi vào AOF thành một khối `MULTI`/`EXEC` gồm các lệnh ghi đã chạy, **kể cả** phần ghi trước khi Lua báo lỗi. Nếu crash cắt ngang đuôi AOF, `aof-load-truncated yes` (mặc định) bỏ khối chưa hoàn chỉnh. Vì vậy mutation hợp lệ hoặc còn đủ mọi side effect, hoặc mất cả; Function lỗi giữa chừng thì phần ghi dở vẫn còn sau restart.
+
 | Chủ đề | Thiết kế |
 | --- | --- |
-| RPO / RTO | Crash: theo kết quả đo (`always` = 0, `everysec` ≤ 1 s), khởi động lại < 1 phút. VM bị Oracle thu hồi: mất ≤ 24 h, dựng lại từ repo infra + backup trong 15–30 phút |
+| RPO / RTO | Crash: theo kết quả đo (`always` = 0 với lệnh đã ACK, `everysec` khoảng 1 s, có thể tới \~2 s khi fsync chậm), khởi động lại < 1 phút. VM bị Oracle thu hồi: mất ≤ 24 h, dựng lại từ repo infra + backup trong 15–30 phút |
 | Backup | `BGSAVE` hằng ngày và trước mỗi deploy; RDB + thư mục AOF được **mã hóa rồi đẩy lên Cloudflare R2** (khác nhà cung cấp với Oracle); khóa mã hóa nằm trong GitHub Environment secrets, không nằm cạnh backup |
 | Ghi sai | AOF chép lỗi một cách trung thành; khôi phục bằng `redis-check-aof --truncate-to-timestamp` hoặc backup ngày trước |
 | Restore drill | Chạy **trên VM prod**, khôi phục vào một Redis tạm (container riêng, port riêng), chạy verify-invariants rồi xóa. Hằng tuần và trước migration lớn; fail thì cảnh báo. Backup prod không bao giờ vào runner CI |
@@ -539,13 +553,13 @@ Mock Redis chỉ dùng cho unit test; concurrency, persistence, Search và ACL p
 | T-003 | User workspace khác mở task theo ID | `404` |
 | T-004 | 50 create task song song | 50 issue number khác nhau |
 | T-005 | 2 client move cùng version | 1 thành công, 1 `409`, task ở đúng 1 cột |
-| T-006 | Cùng tab kéo 2 lần liên tiếp | Cả 2 thành công, không `409` |
+| T-006 | Cùng tab kéo 2 lần liên tiếp | Cả 2 thành công, không `409` (queue lấy `expectedVersion` từ response trước) |
 | T-007 | Remove member rồi assign/create gán cho user đó; và assign rồi remove | Remove trước: Function từ chối. Assign trước: hợp lệ, worker unassign sau remove |
 | T-008 | `FCALL` timeout rồi client retry cùng key | Đúng 1 task, 1 event |
 | T-009 | Cùng key, khác payload | `422 IDEMPOTENCY_KEY_REUSED` |
 | T-010 | Job batch “zombie” có epoch cũ | Bị Function từ chối |
 | T-011 | Event có `seq ≤ lastSeq` đến muộn | Client bỏ qua |
-| T-012 | Rebalance cột | Thứ tự giữ nguyên, version không đổi, client khác không bị `409` |
+| T-012 | Rebalance cột | Thứ tự giữ nguyên, version task khác không đổi, đúng 1 event, client khác không bị `409` và tải lại cột |
 | T-013 | Event lỗi 4 lần | Vào dead-letter, không chặn event sau |
 | T-014 | Worker crash trước `XACK` | Không trùng notification |
 | T-015 | Hai admin gỡ nhau cùng lúc | Còn ít nhất 1 admin |
