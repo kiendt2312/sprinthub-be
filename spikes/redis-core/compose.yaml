@@ -1,0 +1,10 @@
+# Spike only. Pin the exact image digest after task 1.2 (see REPORT.md).
+services:
+  redis:
+    image: redis:8
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    ports:
+      - "127.0.0.1:6390:6379"
+    volumes:
+      - ./redis.conf:/usr/local/etc/redis/redis.conf:ro
+      - ./data:/data

@@ -1,0 +1,41 @@
+schema: spec-driven
+
+context: |
+  Product: SprintHub — task management (Kanban, Sprint, Backlog, realtime) for
+  software teams of 3–10 people. Personal learning/portfolio project, one developer.
+
+  Core constraint: Redis Open Source 8 is the ONLY business database (JSON as
+  canonical records, SET/ZSET/STRING as hand-built indexes, Redis Functions for
+  every multi-key write, Streams for domain events, Redis Search P1). No SQL/NoSQL
+  database besides Redis.
+
+  Non-negotiable rules (see docs/design/design.md and docs/adr/):
+    - Every condition that can break an invariant (membership, role,
+      expectedVersion, idempotency key, fencing epoch, admin/owner counts) is
+      checked INSIDE the Redis Function, before the first write.
+    - Canonical keys are `{entity}:{id}` with no sub-keys; indexes use their own
+      hyphenated type names. Prefix `sh:v1:`.
+    - No KEYS/SCAN in request paths; each Function < 5 ms; board read ≤ 3 round trips.
+    - FCALL timeout means "unknown outcome": never blind-retry a mutation.
+    - BE returns error `code` + `params`; FE translates (EN/VI).
+    - Concurrency/persistence/Search/ACL tests run against real Redis.
+
+  Stack: NestJS + TypeScript API and worker, node-redis, Node 24, pnpm, Vitest.
+  Realtime: SSE with Last-Event-ID = workspace seq. Auth: opaque session token in
+  Redis (no JWT). Deploy: local → prod on one Oracle Always Free VM via SSH +
+  Docker Compose; infra lives in sibling repo sprinthub-infra.
+
+  Repos: sprinthub-be (this, hub: specs, contract, docs), sprinthub-fe (local dir
+  sprinthub-ui), sprinthub-infra, sprinthub-admin-ui and sprinthub-admin-service
+  (Platform Admin; admin-service reads Redis directly but writes ONLY via FCALL
+  to the `sprinthub` Function library owned by this repo). API contract for a
+  change lives in openspec/changes/<change>/contract.md; FE generates types from
+  openapi.json.
+
+  Language: write proposal/design/tasks in Vietnamese; code, identifiers and spec
+  requirement names may be English.
+
+rules:
+  tasks:
+    - Each task group ends with a verification task that runs against real Redis.
+    - Tasks that touch an invariant must name the invariant number from design.md.

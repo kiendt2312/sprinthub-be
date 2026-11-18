@@ -1,0 +1,27 @@
+# deps & build
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# env & secrets (never commit)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# redis data from local runs / spikes
+dump.rdb
+appendonlydir/
+spikes/**/data/
+
+# logs & OS
+*.log
+logs/
+.DS_Store
+
+# editor / local agent state
+.vscode/
+.idea/
+.claude/settings.local.json
