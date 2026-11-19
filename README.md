@@ -8,8 +8,8 @@ dùng **Redis 8 làm database chính duy nhất**. Dự án học tập/portfoli
 - Spec và thay đổi: [openspec/](openspec/)
 - Các repo liên quan: [docs/REPOSITORIES.md](docs/REPOSITORIES.md)
 
-Trạng thái: đang làm spike lõi Redis
-([openspec/changes/spike-redis-core](openspec/changes/spike-redis-core)).
+Trạng thái: spike lõi Redis đã xong ([REPORT](spikes/redis-core/REPORT.md),
+[change đã archive](openspec/changes/archive/2026-11-19-spike-redis-core)); đang viết các change P0.
 
 Stack dự kiến: NestJS + TypeScript, node-redis, Redis Open Source 8 (JSON, Search,
 Functions, Streams), Vitest. License: MIT.
