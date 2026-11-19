@@ -52,7 +52,7 @@ export async function withClients<T>(count: number, run: (clients: Client[]) => 
   }
 }
 
-async function createFixture(client: Client, keys: Keys) {
+export async function createFixture(client: Client, keys: Keys) {
   const id = randomUUID();
   const workspaceId = `ws_${id}`;
   const projectId = `prj_${id}`;
@@ -98,7 +98,7 @@ async function createFixture(client: Client, keys: Keys) {
 
 export type Fixture = Awaited<ReturnType<typeof createFixture>>;
 
-async function scopedKeys(client: Client, keys: Keys) {
+export async function scopedKeys(client: Client, keys: Keys) {
   const names = new Set<string>();
   for await (const batch of client.scanIterator({ MATCH: `${keys.prefix}*`, COUNT: 500 })) {
     for (const name of batch) names.add(name);

@@ -96,7 +96,7 @@ Story chỉ xong khi tiêu chí đã có test chạy trên Redis thật. Cột "
 
 ## Yêu cầu phi chức năng
 
-Các con số là **mục tiêu thiết kế**, chưa phải kết quả benchmark; mỗi con số được đo và công bố cùng phương pháp đo.
+Các ngưỡng dưới đây là mục tiêu nghiệm thu. Số đo trên Redis 8.10.3 và phương pháp đo nằm trong báo cáo spike. [Báo cáo spike Redis](../../spikes/redis-core/REPORT.md).
 
 **Kịch bản đo chuẩn** (dùng cho latency, round trip, tải): board 200 task chia 4 cột; tải thường 4 req/s, đỉnh 12 req/s; 80% đọc, 20% ghi, phần ghi chia cho ít nhất 5 actor để mỗi actor dưới 120 lệnh ghi/phút (rate limit); mỗi lượt 10 phút; k6 chạy từ máy ở Việt Nam tới VM. `http_req_duration` của k6 không tính DNS và thiết lập kết nối.
 
@@ -107,7 +107,7 @@ Các con số là **mục tiêu thiết kế**, chưa phải kết quả benchma
 | Lệnh chậm | Mỗi Function: **max** < 5 ms trên workload nghiệm thu (p99 chỉ để quan sát); không `KEYS`/`SCAN` trong request | `SLOWLOG` với ngưỡng 0 trong lượt đo cô lập | Spike, P0 |
 | Tính đúng | 100 lần move/assign song song không vi phạm invariant | Concurrency suite + verifier | P0 |
 | Tenant isolation | Mọi test truy cập chéo trả `404` | IDOR suite | P0 |
-| RPO crash | `always`: 0 lệnh đã ACK bị mất; `everysec`: khoảng 1 s (đo trong spike) | Kill drill | Spike |
+| RPO crash process | `appendfsync always`, 0 lệnh đã ACK bị mất. Spike quan sát 0/1.645 qua ba lượt `SIGKILL` | Kill drill trên cùng volume | Spike |
 | RPO mất VM | Tuổi bản backup **đã upload và restore được** ≤ 24 h | Restore drill hằng tuần | P1 |
 | RTO | Restart < 1 phút. Mất VM: 15–30 phút tính từ lúc **có VM thay thế**; thời gian chờ cấp máy ghi riêng | Restore drill có bấm giờ, dựng lại VM ít nhất 1 lần | P0 (restart), P1 |
 | Bộ nhớ | `used_memory` < 70% `maxmemory`; `maxmemory` ≥ 2× dataset đo được; RSS của mọi container cộng đỉnh copy-on-write lúc `BGSAVE`/rewrite và Redis tạm của restore drill < 80% RAM VM | `INFO memory`, `MEMORY USAGE`, `docker stats` lúc `BGSAVE` | P1 |
@@ -227,8 +227,8 @@ Trình duyệt không bao giờ nói chuyện trực tiếp với Redis. Mọi m
 
 **Quyết định còn mở**
 
-- [ ] Bản Redis 8.x và image digest (chốt trong spike; đang thử 8.10.3)
-- [ ] `appendfsync everysec` hay `always` (đo trong spike rồi chốt)
+- [x] Redis 8.10.3, OCI index digest `sha256:1f88291b4c57bdf249f02eb085a8669889b2d2954e91d4de5118a5da6b78dd53`
+- [x] `appendfsync always`, sau khi so crash và p99 client trong spike
 - [ ] Thư viện UI cho bản tối thiểu (chọn khi scaffold FE); thiết kế Figma ở P2
 - [ ] Cách đăng nhập admin console: cùng domain, dùng chung session của BE (đề xuất, xác nhận khi làm P1)
 - [ ] Home region của tenancy Oracle (kiểm tra trước khi tạo VM)
@@ -246,6 +246,7 @@ Trình duyệt không bao giờ nói chuyện trực tiếp với Redis. Mọi m
 
 | Thời điểm | Quyết định |
 | --- | --- |
+| Spike lõi Redis 19/11/2026 | Redis 8.10.3 pin OCI index digest như trên, `appendfsync always`, giữ trần 500 task/cột cho P0 (rebalance max 1,390 ms trong spike) |
 | Review spec v1.6 → v1.7 | Cột P0 tối đa 500 do Function chặn (`COLUMN_FULL`); `PROJECT_ARCHIVED` chỉ cho mutation mới, có ngoại lệ unarchive, cleanup, replay; worker P0 lưu job rồi mới ACK, trim `ACKED`, dead-letter tối thiểu, unassign kiểm đúng workspace; CLI lấy danh tính từ file ánh xạ, T-015 vào P0; cookie đã thu hồi trả `SESSION_INVALID`; ngân sách đọc board 3 batch; Function max < 5 ms; dashboard chỉ đếm theo cột |
 | Review spec 18/11/2026 (v1.6) | Worker tối thiểu vào P0; index backlog từ P0, UI ở P1; cột ≤ 500 ở P0, job rebalance lớn ở P1; auth và CLI không dùng cache response; CLI admin qua SSH với `sh-maint`, actor `cli:<adminId>`; demo tách P0 local và P1 deploy; UI P0 tự làm tối thiểu |
 | Review spec spike (v1.5) | Thứ tự chỉ ở ZSET, HASH issue key, thứ tự kiểm tra trong Function, reply JSON, retry chỉ qua `Idempotency-Key`, move kèm rebalance một event |

@@ -350,6 +350,15 @@ it.each([
   await assertRejected(() => removeMember(client, input, keys), "NOT_FOUND");
 });
 
+it("stops before its first write when a new mutation reuses a generated task ID", async () => {
+  const input = createInput("tsk_existing");
+  expect((await createTask(client, input, keys)).ok).toBe(true);
+  const before = await snapshot();
+  await expect(createTask(client, { ...input, idempotencyKey: "different-request" }, keys))
+    .rejects.toThrow("Caller-generated task ID already exists");
+  expect(await snapshot()).toEqual(before);
+});
+
 it("stops before its first write on an occupied issue field or invalid outbox type", async () => {
   const input = createInput("tsk_internal");
   const issueIndex = keys.workspaceTaskKeys(workspaceId);

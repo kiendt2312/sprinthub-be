@@ -9,9 +9,10 @@ dòng code nào chứng minh điều này chạy đúng và đủ nhanh trên Re
 
 **Goals:**
 - `sh_create_task` cấp issue key không trùng khi 50 request chạy song song.
-- `sh_move_task` cho đúng 1 thành công, 1 `TASK_VERSION_CONFLICT` khi 2 client move
-  cùng version; task luôn nằm đúng 1 cột (invariant 4, 5); gửi lại nguyên lệnh đã
-  thành công nhận đúng response cũ.
+- `sh_move_task` cho đúng 1 thành công khi 2 client move cùng version. Nếu `from`
+  của request thua đã cũ, caller làm mới `from` sau `KEYS_MISMATCH` và nhận
+  `TASK_VERSION_CONFLICT`. Task luôn nằm đúng 1 cột (invariant 4, 5). Retry theo
+  cùng `Idempotency-Key` với `from` đã làm mới trả response thành công đã lưu.
 - Retry cùng `Idempotency-Key` không tạo task thứ hai, không tăng seq hay phát event
   lần hai; cùng key khác payload bị từ chối (invariant 8, 13, 17).
 - Membership được Function kiểm tra tại thời điểm ghi, theo cả hai thứ tự create/remove
@@ -75,8 +76,9 @@ dòng code nào chứng minh điều này chạy đúng và đủ nhanh trên Re
   là task đầu, không có thì chèn cuối; cột rỗng score 1024. Mọi score mới (kể cả create
   ở cuối cột) phải nằm trong `|2^50|`, không thì rebalance.
 - **Reply:** chuỗi JSON `{"ok":true,"data":…,"seq":…}` hoặc
-  `{"ok":false,"code":…,"params":…}`; lỗi giao thức Redis chỉ dành cho bug (reply lỗi
-  của Lua chỉ mang được một chuỗi, mất `params`). Mã: `KEYS_MISMATCH` (nội bộ),
+  `{"ok":false,"code":…,"params":…}`. Lỗi giao thức Redis dành cho lỗi nội bộ,
+  gồm ID do caller cấp đã tồn tại và field issue key kế tiếp bị chiếm. Reply lỗi
+  của Lua chỉ mang được một chuỗi, mất `params`. Mã: `KEYS_MISMATCH` (nội bộ),
   `NOT_FOUND`, `PROJECT_ARCHIVED`, `ASSIGNEE_NOT_MEMBER`, `IDEMPOTENCY_KEY_REUSED`,
   `TASK_VERSION_CONFLICT` (`params.currentVersion`), `INVALID_STATUS_TRANSITION`,
   `INVALID_POSITION_ANCHOR`, `COLUMN_FULL` (`params.limit` = 500).
@@ -84,6 +86,8 @@ dòng code nào chứng minh điều này chạy đúng và đủ nhanh trên Re
   `TASK_MOVED`, `MEMBER_REMOVED`) với một seq; create hoặc move có rebalance thì event
   của chính thao tác đó mang thêm `rebalancedColumn`;
   rebalance ghi thêm entry `board:{p}:{status}` vào `workspace-changes` cùng seq.
+  Spike dùng `eventId = workspaceId:seq`. Envelope spike sẽ cần thêm `requestId`
+  khi đưa Function vào backend theo thiết kế chung.
 - **Outbox tối thiểu trong spike:** create và move đều `INCR workspace-seq`,
   `ZADD workspace-changes`, `XADD stream:domain-events`; không có consumer.
 - **Verifier:** script TypeScript chạy offline khi không có ghi, được phép `SCAN`
@@ -109,7 +113,7 @@ dòng code nào chứng minh điều này chạy đúng và đủ nhanh trên Re
   `slowlog-max-len` đủ lớn trong lượt đo cô lập (mặc định chỉ ghi lệnh ≥ 10 ms); phía
   client đo quanh `FCALL` qua loopback, chỉ dùng để so hai mode fsync. Ghi rõ máy đo.
   Lưu ý `busy-reply-threshold` mặc định 5 giây và Redis không tự dừng Function.
-- **fsync:** cùng workload ghi với `everysec` rồi `always`; client ghi log ID đã gửi và
+- **fsync:** cùng workload ghi với `always` rồi `everysec`; client ghi log ID đã gửi và
   ID đã nhận ACK, sau `kill -9` khởi động lại trên cùng volume và đối chiếu. Mỗi lần gọi
   Function vào AOF thành một khối `MULTI`/`EXEC` (kể cả phần ghi trước lỗi Lua);
   `aof-load-truncated yes` bỏ khối cụt ở đuôi. Kỳ vọng nhất quán chỉ áp cho mutation

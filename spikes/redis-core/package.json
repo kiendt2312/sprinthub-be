@@ -13,6 +13,8 @@
     "test": "vitest run",
     "scenarios": "tsx scenarios/run-all.ts",
     "scenarios:reset": "tsx scenarios/3.11-clean-run.ts",
+    "persistence": "tsx scenarios/4.1-restart.ts && tsx scenarios/4.2-crash.ts",
+    "bench": "tsx scenarios/4.3-bench.ts",
     "verify": "tsx src/verify-task-indexes.ts"
   },
   "dependencies": {

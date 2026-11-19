@@ -216,6 +216,7 @@ KEYS: workspace-members, project, project-task-seq, workspace-task-keys, task (i
 ```
 
 - Key idempotency theo actor (`idempotency:{actorId}:{key}`) nên actor khác dùng trùng key không đụng nhau.
+- ID task đã có là lỗi cấp ID ở caller. Field issue key kế tiếp bị chiếm là lỗi nhất quán của index hoặc counter. Library spike trả lỗi giao thức Redis trước khi ghi cho cả hai trường hợp.
 - Lỗi sau lệnh ghi đầu tiên chỉ có thể là bug (OOM không tính: với `noeviction` Redis từ chối Function có ghi ngay từ đầu). Redis **không** rollback: phần đã ghi vẫn còn và vẫn vào AOF. Lỗi như vậy trả `500`, không retry tự động; verifier phát hiện thiếu index, test riêng kiểm thiếu event và idempotency.
 - Rebuild sau sự cố phải giữ high-water mark của `project-task-seq` (`max(number)` không đủ nếu task cuối đã xóa), để số không bị tái sử dụng.
 
@@ -234,7 +235,7 @@ Thứ tự dùng số nguyên cách quãng `STEP = 1024`. Client gửi `afterTas
 
 - **Quy tắc task neo:** sau khi loại chính task đang move khỏi cột đích, hai task neo phải khác nhau, khác task đang move, có trong `board:{p}:{to}` và kề nhau (`ZRANK(before) = ZRANK(after) + 1`). Chỉ `afterTaskId`: nó phải là task cuối cột. Chỉ `beforeTaskId`: nó phải là task đầu cột. Không có task neo: chèn cuối cột. Sai thì `422 INVALID_POSITION_ANCHOR`, client tải lại cột. Reorder trong cùng cột dùng cùng quy tắc.
 - Cột rỗng: score `1024`. Chèn cuối: `max + 1024`. Chèn đầu: `min − 1024`. Chèn giữa `a < b`: `floor((a + b) / 2)` khi `b − a ≥ 2`.
-- Hết khoảng (`b − a < 2`) hoặc score mới vượt `|2^50|`: rebalance cả cột thành `i × 1024` theo thứ tự hiện tại rồi tính lại chỗ chèn, trong cùng Function (cột ≤ 500 task; con số này phải đo, vượt 5 ms thì hạ xuống).
+- Hết khoảng (`b − a < 2`) hoặc score mới vượt `|2^50|`: rebalance cả cột thành `i × 1024` theo thứ tự hiện tại rồi tính lại chỗ chèn, trong cùng Function. Spike đo max 1,390 ms phía Redis trên 100 lượt reorder cột đủ 500 task với `appendfsync always`. Giữ trần 500 task cho P0 và đo lại trên VM arm64. [Báo cáo spike](../../spikes/redis-core/REPORT.md#43--latency-phía-redis).
 - **Giới hạn cột (P0):** số task của cột đích **sau** thao tác không được vượt 500 (create và move sang cột khác tính thêm 1, reorder cùng cột giữ nguyên); vượt thì `409 COLUMN_FULL` (`params.limit`) trước lệnh ghi đầu tiên. Client báo cho user, không retry.
 - **P1, chỉ khi nâng giới hạn cột:** cột lớn hơn giới hạn rebalance trong Function thì Function trả `409 BOARD_REBALANCE_REQUIRED` **trước khi ghi**; worker rebalance bằng job batch; client retry với **cùng** `Idempotency-Key` (lần trước không lưu gì) và không rollback như conflict.
 - Rebalance chỉ ghi ZSET board (vị trí không nằm trong JSON), nên không đổi `version` hay `lastSeq` của task nào khác. Move (hoặc create ở cuối cột) kèm rebalance vẫn là **một** mutation, **một** seq, **một** event của chính thao tác (`TASK_MOVED` hoặc `TASK_CREATED`) có thêm `rebalancedColumn: "{status}"`; `workspace-changes` ghi `task:{id}` và `board:{p}:{status}` cùng seq. Client thấy `rebalancedColumn` thì tải lại cột đó, kể cả khi event đến từ chính tab của mình.
@@ -475,15 +476,16 @@ Notification chỉ lưu tham chiếu (taskId, loại, actor); title và quyền 
 
 ## Persistence, backup, Redis client và deploy
 
-Dữ liệu chỉ bền tới mức cấu hình cho phép: với `appendfsync everysec`, `200 OK` được trả trước khi fsync, nên crash có thể mất khoảng 1 giây ghi cuối.
+Chốt Docker Official Image `redis:8.10.3@sha256:1f88291b4c57bdf249f02eb085a8669889b2d2954e91d4de5118a5da6b78dd53` và `appendfsync always`. Redis fsync dữ liệu AOF trước khi trả ACK. Spike chọn cấu hình này cho database nghiệp vụ duy nhất sau khi đo p99 client trung vị 8,505 ms, so với 6,004 ms của `everysec`. [Báo cáo spike](../../spikes/redis-core/REPORT.md#42--sigkill-khi-đang-ghi).
 
 ```conf
 appendonly yes
 # Redis không cho comment cuối dòng: mỗi comment một dòng riêng.
-# Đo so với "always" rồi chốt.
-appendfsync everysec
-# Cho khôi phục về thời điểm (xác minh trên bản đã pin).
+appendfsync always
+no-appendfsync-on-rewrite no
+# Lưu dấu thời gian để hỗ trợ khôi phục về thời điểm.
 aof-timestamp-enabled yes
+aof-load-truncated yes
 save 900 1
 maxmemory 512mb
 maxmemory-policy noeviction
@@ -495,11 +497,11 @@ Mỗi lần gọi Function được ghi vào AOF thành một khối `MULTI`/`EX
 
 | Chủ đề | Thiết kế |
 | --- | --- |
-| RPO / RTO | Crash: theo kết quả đo (`always` = 0 với lệnh đã ACK, `everysec` khoảng 1 s, có thể tới \~2 s khi fsync chậm), khởi động lại < 1 phút. VM bị Oracle thu hồi: mất ≤ 24 h, dựng lại từ repo infra + backup trong 15–30 phút |
+| RPO / RTO | Spike `SIGKILL` với `always` mất 0/1.645 lệnh đã ACK sau ba lượt. Restart thường đến `PONG` mất 564,7 ms trên máy đo, mục tiêu trên VM < 1 phút. Page cache của host còn nguyên trong phép thử `SIGKILL`. VM bị thu hồi: RPO mục tiêu ≤ 24 h theo tuổi backup khôi phục được, dựng lại từ infra + backup trong 15–30 phút tính từ lúc có VM thay thế |
 | Backup | `BGSAVE` hằng ngày và trước mỗi deploy, chờ `LASTSAVE` đổi; **file RDB hoàn chỉnh** là artifact backup (không copy thư mục AOF đang chạy, vì copy lúc rewrite có thể ra bản hỏng), được **mã hóa rồi đẩy lên Cloudflare R2**; retention theo dung lượng đo được, dưới 10 GB free, cảnh báo ở 8 GB (khác nhà cung cấp với Oracle); khóa mã hóa nằm trong GitHub Environment secrets, không nằm cạnh backup |
 | Ghi sai | AOF chép lỗi một cách trung thành; khôi phục bằng `redis-check-aof --truncate-to-timestamp` hoặc backup ngày trước |
 | Restore drill | Chạy **trên VM prod**, khôi phục vào một Redis tạm (container riêng, port riêng), chạy verify-invariants rồi xóa. Hằng tuần và trước migration lớn; fail thì cảnh báo. Backup prod không bao giờ vào runner CI |
-| Capacity | VM 2 OCPU / 12 GB. Task \~1,5 KB, 10.000 task + comment + activity + index ≈ 100–150 MB (giả định, phải đo bằng `MEMORY USAGE`); `maxmemory` ≥ 2× dataset, còn dư cho fork và Redis tạm của restore drill |
+| Capacity | VM 2 OCPU / 12 GB. Spike đo trung bình 1.548,8 byte/task JSON và, với 5.000 task cùng index, stream và idempotency, `used_memory` 16,46 MiB, RSS 39,45 MiB. Đo lại với comment, activity, Search và đỉnh copy-on-write trên workload P1. Giữ `maxmemory` ≥ 2× dataset đo được và chừa RAM cho fork cùng Redis tạm của restore drill |
 | Host | `vm.overcommit_memory=1`, tắt transparent huge pages, swap bằng RAM; đặt trong cloud-init để dựng lại VM là có ngay |
 | Tải | Khoảng 1–4 req/s quy mô demo, đỉnh ×3; một node dư sức. SPOF (Redis, VM, API) được chấp nhận |
 

@@ -20,6 +20,9 @@ pnpm load
 pnpm smoke
 pnpm test
 pnpm scenarios
+pnpm scenarios:reset
+pnpm persistence
+pnpm bench
 pnpm verify
 pnpm exec tsc --noEmit
 docker compose down
@@ -68,6 +71,22 @@ xóa biến thể sau khi thử lỗi.
 Để chạy 3.11, dùng `pnpm scenarios:reset` khi Redis spike đang rảnh. Lệnh chạy
 `seed --reset` trên prefix cấu hình, nạp lại library và chạy lại 3.1–3.10 với
 verifier sau từng kịch bản.
+
+## Persistence và benchmark
+
+Chạy `pnpm persistence` sau `pnpm seed`, `pnpm load` và `pnpm scenarios` trên
+container spike của worktree hiện tại. Script so snapshot trước/sau `docker restart`,
+rồi dùng `docker kill -s KILL` và `docker start` trên cùng container ba lần cho mỗi
+chế độ fsync. Mỗi lượt dùng `CONFIG SET` và kiểm tra lại bằng `CONFIG GET`. Khi
+khởi động lại, Redis nạp cấu hình `appendfsync always` từ `redis.conf`. Client
+ghi ID đã gửi và đã ACK vào NDJSON trong `logs/crash-logs/` và in đường dẫn lúc
+chạy. `SIGKILL` giữ nguyên page cache của host, nên kết quả chỉ áp dụng cho crash
+process.
+
+Chạy tiếp `pnpm bench` để lấy p50/p99/max phía Redis từ `SLOWLOG` và số bộ nhớ từ
+`MEMORY USAGE` và `INFO memory` với 5.000 task. Chạy từng lệnh tuần tự trên Redis
+spike tại `redis://127.0.0.1:6390` khi không có workload khác. Hai phép thử dùng
+fixture riêng. Benchmark khôi phục cấu hình slowlog khi kết thúc.
 
 ## Verifier
 

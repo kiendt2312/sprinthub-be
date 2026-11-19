@@ -33,8 +33,8 @@ song song dùng kết nối riêng cho từng luồng.
 
 ## 4. Persistence và số đo
 
-- [ ] 4.1 `docker restart` → `FUNCTION LIST` còn library, verify sạch, thứ tự cột, `workspace-seq`, idempotency còn hạn không đổi (invariant 4, 5, 13, 17)
-- [ ] 4.2 `kill -9` khi đang tạo task, client ghi log `taskId` đã gửi và đã ACK, khởi động lại trên cùng volume; chạy với `always` rồi `everysec`; mỗi task còn lại có đủ JSON, index, event, idempotency; `always` không mất ID đã ACK, `everysec` báo số mất và số request đang bay; so p99 phía client (invariant 4, 8, 9, 17)
-- [ ] 4.3 Đo phía server bằng `SLOWLOG` (`slowlog-log-slower-than 0`, `slowlog-max-len` lớn) max (ngân sách < 5 ms) và p50/p99 (quan sát) cho create, move thường và move có rebalance cột 500; đo `MEMORY USAGE` task JSON và index với 5.000 task (10 project × 500 task)
-- [ ] 4.4 Viết `spikes/redis-core/REPORT.md`: máy đo, bản Redis + digest, bảng số đo, quyết định `appendfsync`, giới hạn cột rebalance, các giả định bị bác bỏ
-- [ ] 4.5 Kiểm tra trên Redis thật: chạy lại 4.1–4.3 trên image đã pin; cập nhật `docs/design/design.md` và `openspec` nếu kết quả khác thiết kế; chốt 2 quyết định mở trong Spec
+- [x] 4.1 `docker restart` → `FUNCTION LIST` còn library, verify sạch, thứ tự cột, `workspace-seq`, idempotency còn hạn không đổi (invariant 4, 5, 13, 17)
+- [x] 4.2 `kill -9` khi đang tạo task, client ghi log `taskId` đã gửi và đã ACK, khởi động lại trên cùng volume; chạy với `always` rồi `everysec`; mỗi task còn lại có đủ JSON, index, event, idempotency; `always` không mất ID đã ACK, `everysec` báo số mất và số request đang bay; so p99 phía client (invariant 4, 8, 9, 17)
+- [x] 4.3 Đo phía server bằng `SLOWLOG` (`slowlog-log-slower-than 0`, `slowlog-max-len` lớn) max (ngân sách < 5 ms) và p50/p99 (quan sát) cho create, move thường và move có rebalance cột 500; đo `MEMORY USAGE` task JSON và index với 5.000 task (10 project × 500 task)
+- [x] 4.4 Viết `spikes/redis-core/REPORT.md`: máy đo, bản Redis + digest, bảng số đo, quyết định `appendfsync`, giới hạn cột rebalance, các giả định bị bác bỏ
+- [x] 4.5 Kiểm tra trên Redis thật: chạy lại 4.1–4.3 trên image đã pin; cập nhật `docs/design/design.md` và `openspec` nếu kết quả khác thiết kế; chốt 2 quyết định mở trong Spec
