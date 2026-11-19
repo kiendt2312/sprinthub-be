@@ -8,8 +8,8 @@ idempotency và điều kiện nghiệp vụ trước lệnh ghi đầu tiên.
 
 ### Requirement: Reply Function có cấu trúc
 Mọi Function ghi SHALL trả một chuỗi JSON: `{"ok":true,"data":…,"seq":…}` khi thành
-công hoặc `{"ok":false,"code":…,"params":…}` khi từ chối. Lỗi giao thức Redis SHALL chỉ
-xuất hiện khi Function có bug.
+công hoặc `{"ok":false,"code":…,"params":…}` khi từ chối nghiệp vụ. Lỗi giao thức
+Redis SHALL chỉ dùng cho lỗi nội bộ của caller, Function hoặc dữ liệu Redis.
 
 #### Scenario: Conflict mang theo version hiện tại
 - **WHEN** move bị từ chối vì `expectedVersion` cũ trong khi task đang ở version 7
@@ -30,8 +30,8 @@ ARGS. Lệch SHALL trả `KEYS_MISMATCH` và không ghi gì.
 - **THEN** Function trả `KEYS_MISMATCH`, không trả lại response của B và không ghi gì
 
 #### Scenario: Cột nguồn đã đổi
-- **WHEN** caller gọi move với `from` = TODO trong khi task đã ở IN_PROGRESS và chưa từng có lệnh nào với `Idempotency-Key` này
-- **THEN** Function trả `KEYS_MISMATCH` và không ghi gì
+- **WHEN** caller gọi move với `from` = TODO trong khi task đã ở IN_PROGRESS
+- **THEN** Function trả `KEYS_MISMATCH` trước khi tra idempotency và không ghi gì. Caller đọc lại `from` trước khi thử lại với cùng `Idempotency-Key`
 
 ### Requirement: Issue key duy nhất theo project
 Hệ thống SHALL cấp cho mỗi task mới số `n = project-task-seq + 1` và key
@@ -45,7 +45,7 @@ key và số không được tái sử dụng.
 
 #### Scenario: Field kế tiếp đã bị chiếm
 - **WHEN** `workspace-seq` khác `project-task-seq`, và field `{KEY}-{project-task-seq + 1}` đã có sẵn trong `workspace-task-keys`
-- **THEN** Function từ chối trước khi ghi, `project-task-seq` và `workspace-seq` không đổi
+- **THEN** Function báo lỗi giao thức Redis trước khi ghi, `project-task-seq` và `workspace-seq` không đổi
 
 ### Requirement: Tạo task kiểm tra quyền và dữ liệu trong Function
 `sh_create_task` SHALL kiểm tra, trước lệnh ghi đầu tiên: actor là member của
@@ -60,6 +60,10 @@ bất kỳ key nào.
 #### Scenario: Project đã archive
 - **WHEN** member tạo task mới trong project có `archivedAt`
 - **THEN** Function trả `PROJECT_ARCHIVED` và không ghi gì
+
+#### Scenario: Caller cấp lại ID task đã tồn tại
+- **WHEN** caller gửi lệnh tạo mới với một `Idempotency-Key` khác và `taskId` đã tồn tại
+- **THEN** Function báo lỗi giao thức Redis trước khi ghi và snapshot không đổi
 
 #### Scenario: Replay qua thời điểm archive
 - **WHEN** tạo task thành công, sau đó project bị archive, rồi client retry cùng `Idempotency-Key` và payload
@@ -113,7 +117,7 @@ chuyển trạng thái nằm trong bảng cho phép. Mỗi lần di chuyển th�
 
 #### Scenario: Hai client di chuyển cùng version
 - **WHEN** hai yêu cầu di chuyển cùng một task từ TODO sang IN_PROGRESS, cùng `expectedVersion`, khác `clientMutationId` và khác `Idempotency-Key`, chạy đồng thời trên hai kết nối
-- **THEN** đúng một yêu cầu thành công, yêu cầu còn lại nhận `TASK_VERSION_CONFLICT` với `params.currentVersion` mới, `version` tăng đúng 1 và task nằm trong đúng một cột
+- **THEN** đúng một yêu cầu thành công, yêu cầu còn lại nhận `KEYS_MISMATCH`. Sau khi caller đọc lại `from` và gọi lại với `expectedVersion` cũ, Function trả `TASK_VERSION_CONFLICT` với `params.currentVersion` mới. `version` tăng đúng 1 và task nằm trong đúng một cột
 
 #### Scenario: Chuyển trạng thái không hợp lệ
 - **WHEN** yêu cầu chuyển task từ TODO sang DONE
@@ -149,7 +153,8 @@ chèn đầu là `min − 1024`, chèn giữa `a < b` là `floor((a + b) / 2)` k
 ### Requirement: Rebalance cột giữ thứ tự trong cùng một mutation
 Khi `b − a < 2` hoặc score mới vượt `|2^50|` (kể cả create ở cuối cột), Function SHALL
 đánh số lại cả cột thành `i × 1024` giữ nguyên thứ tự rồi chèn, không đổi `version` của
-task khác, và vẫn phát đúng một event `TASK_MOVED` với `rebalancedColumn`; entry
+task khác, và vẫn phát đúng một event của thao tác (`TASK_MOVED` khi move, `TASK_CREATED`
+khi create) mang `rebalancedColumn`; entry
 `board:{p}:{status}` SHALL được ghi vào `workspace-changes` cùng seq.
 
 #### Scenario: Hết khoảng trống
@@ -216,3 +221,12 @@ ACK bị mất SHALL được đo và báo cáo.
 #### Scenario: Crash process khi đang ghi
 - **WHEN** client tạo task liên tục, ghi log mọi `taskId` đã gửi và đã nhận ACK, rồi Redis bị `kill -9` và khởi động lại trên cùng volume, chạy lần lượt với `always` và `everysec`
 - **THEN** mỗi task còn lại có đủ JSON, index, event `TASK_CREATED` và bản ghi idempotency; với `always` mọi `taskId` đã ACK đều còn; với `everysec` số `taskId` đã ACK bị mất và số request đang bay được ghi riêng vào `REPORT.md`
+
+### Requirement: Xóa member idempotent
+`sh_remove_member` SHALL nhận `Idempotency-Key` như mọi mutation nghiệp vụ: KEYS gồm
+`idempotency:{actorId}:{idempotencyKey}`, tra idempotency sau khi kiểm tra quyền, lưu ở
+cuối khi thành công.
+
+#### Scenario: Gửi lại lệnh xóa member
+- **WHEN** lệnh xóa user X thành công rồi được gửi lại với cùng `Idempotency-Key` và cùng payload
+- **THEN** Function trả đúng response lần đầu; `workspace-seq` và số event `MEMBER_REMOVED` chỉ tăng một lần

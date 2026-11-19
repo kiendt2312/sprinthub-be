@@ -5,7 +5,8 @@ import { createKeys } from "./keys.js";
 
 const expectedConfig = {
   appendonly: "yes",
-  appendfsync: "everysec",
+  appendfsync: "always",
+  "no-appendfsync-on-rewrite": "no",
   "aof-timestamp-enabled": "yes",
   "aof-load-truncated": "yes",
   maxmemory: String(256 * 1024 * 1024),
