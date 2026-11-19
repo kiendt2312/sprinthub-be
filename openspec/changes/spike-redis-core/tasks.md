@@ -19,17 +19,17 @@
 Mỗi kịch bản dùng workspace riêng, snapshot trước/sau cho các nhánh từ chối; kịch bản
 song song dùng kết nối riêng cho từng luồng.
 
-- [ ] 3.1 50 `sh_create_task` song song → 50 issue number khác nhau, seq = 50, verify sạch; field kế tiếp đã bị chiếm khi `workspace-seq` ≠ `project-task-seq` → từ chối trước khi ghi (invariant 9)
-- [ ] 3.2 2 move cùng version, khác `clientMutationId` và key → 1 thành công, 1 `TASK_VERSION_CONFLICT` có `params.currentVersion`, task ở đúng 1 cột (invariant 4, 8)
-- [ ] 3.3 Idempotency: retry create cùng key; bỏ response của move khác cột rồi gửi lại nguyên lệnh; cùng key khác payload; actor bị xóa rồi retry; create thành công, archive project rồi retry cùng key (trả response đã lưu) → 1 task, 1 lần tăng version/seq, 1 event, đúng mã lỗi (invariant 8, 13, 17)
-- [ ] 3.4 Tenant: bộ key của workspace khác cùng key idempotency đã dùng; KEYS chứa key idempotency của actor khác; `from` cũ chưa có idempotency → `KEYS_MISMATCH`/`NOT_FOUND`, không replay, không ghi (invariant 2)
-- [ ] 3.5 Membership: remove trước rồi create; create trước rồi remove; không gán/có gán (`user-assigned:none` không tồn tại); 100 cặp xen kẽ trên 100 workspace với assertion đủ hai nhánh (invariant 3, 6)
-- [ ] 3.6 Các nhánh từ chối của move: actor ngoài workspace, task không còn, project archive, TODO → DONE, 6 kiểu task neo sai → đúng mã lỗi, snapshot không đổi; reorder cùng cột đúng thứ tự
-- [ ] 3.7 Thứ tự và rebalance: chèn cột rỗng/cuối/đầu/giữa; fixture 1024/1025; chèn lặp ngay dưới task vừa chèn tới khi rebalance; rebalance cột 500 task; kiểm một event và entry cột cùng seq; cột 500 task: create hoặc move sang cột đó → `COLUMN_FULL`, reorder trong cột vẫn được; cột 499 task và 2 create tranh slot cuối → đúng 1 thành công (invariant 4, 5, 8)
-- [ ] 3.8 Lỗi trước khi ghi (key sai kiểu) → snapshot không đổi
-- [ ] 3.9 Lỗi tiêm sau `JSON.SET task` và sau khi ghi index nhưng trước `XADD`, trên workspace riêng → verifier và assertion event/idempotency phát hiện đúng như spec
-- [ ] 3.10 Verifier: làm hỏng 6 kiểu (thiếu board, thiếu cả `project-tasks` và board, nằm hai cột, orphan, `workspace-task-keys` trỏ sai, score `1.5`) → báo đúng từng mục
-- [ ] 3.11 Kiểm tra trên Redis thật: chạy lại toàn bộ 3.1–3.10 từ dữ liệu sạch; verify sạch sau mỗi kịch bản, trừ workspace cố tình hỏng của 3.9, 3.10 (ở đó so báo cáo với kỳ vọng)
+- [x] 3.1 50 `sh_create_task` song song → 50 issue number khác nhau, seq = 50, verify sạch; field kế tiếp đã bị chiếm khi `workspace-seq` ≠ `project-task-seq` → từ chối trước khi ghi (invariant 9)
+- [x] 3.2 2 move cùng version, khác `clientMutationId` và key → 1 thành công, 1 `TASK_VERSION_CONFLICT` có `params.currentVersion`, task ở đúng 1 cột (invariant 4, 8)
+- [x] 3.3 Idempotency: retry create cùng key; bỏ response của move khác cột rồi gửi lại nguyên lệnh; cùng key khác payload; actor bị xóa rồi retry; create thành công, archive project rồi retry cùng key (trả response đã lưu) → 1 task, 1 lần tăng version/seq, 1 event, đúng mã lỗi (invariant 8, 13, 17)
+- [x] 3.4 Tenant: bộ key của workspace khác cùng key idempotency đã dùng; KEYS chứa key idempotency của actor khác; `from` cũ chưa có idempotency → `KEYS_MISMATCH`/`NOT_FOUND`, không replay, không ghi (invariant 2)
+- [x] 3.5 Membership: remove trước rồi create; create trước rồi remove; không gán/có gán (`user-assigned:none` không tồn tại); 100 cặp xen kẽ trên 100 workspace với assertion đủ hai nhánh (invariant 3, 6)
+- [x] 3.6 Các nhánh từ chối của move: actor ngoài workspace, task không còn, project archive, TODO → DONE, 6 kiểu task neo sai → đúng mã lỗi, snapshot không đổi; reorder cùng cột đúng thứ tự
+- [x] 3.7 Thứ tự và rebalance: chèn cột rỗng/cuối/đầu/giữa; fixture 1024/1025; chèn lặp ngay dưới task vừa chèn tới khi rebalance; rebalance cột 500 task; kiểm một event và entry cột cùng seq; cột 500 task: create hoặc move sang cột đó → `COLUMN_FULL`, reorder trong cột vẫn được; cột 499 task và 2 create tranh slot cuối → đúng 1 thành công (invariant 4, 5, 8)
+- [x] 3.8 Lỗi trước khi ghi (key sai kiểu) → snapshot không đổi
+- [x] 3.9 Lỗi tiêm sau `JSON.SET task` và sau khi ghi index nhưng trước `XADD`, trên workspace riêng → verifier và assertion event/idempotency phát hiện đúng như spec
+- [x] 3.10 Verifier: làm hỏng 6 kiểu (thiếu board, thiếu cả `project-tasks` và board, nằm hai cột, orphan, `workspace-task-keys` trỏ sai, score `1.5`) → báo đúng từng mục
+- [x] 3.11 Kiểm tra trên Redis thật: chạy lại toàn bộ 3.1–3.10 từ dữ liệu sạch; verify sạch sau mỗi kịch bản, trừ workspace cố tình hỏng của 3.9, 3.10 (ở đó so báo cáo với kỳ vọng)
 
 ## 4. Persistence và số đo
 

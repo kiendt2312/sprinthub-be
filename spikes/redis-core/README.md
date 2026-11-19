@@ -19,6 +19,7 @@ pnpm seed
 pnpm load
 pnpm smoke
 pnpm test
+pnpm scenarios
 pnpm verify
 pnpm exec tsc --noEmit
 docker compose down
@@ -52,6 +53,21 @@ rồi dọn dữ liệu fixture.
 Khi retry move sang cột khác với `from` cũ, Function trả `KEYS_MISMATCH` ở bước
 đối chiếu trạng thái trước khi tra idempotency. Caller đọc lại `task.status` và
 gọi lại với `from` mới, giữ nguyên `Idempotency-Key` và payload gốc.
+
+## Kịch bản chứng minh
+
+`pnpm scenarios` chạy tuần tự 3.1–3.10 trên Redis spike đã nạp library. Để chạy
+riêng một kịch bản, dùng `pnpm exec tsx scenarios/3.2-move-conflict.ts`. Mỗi lần
+chạy dùng prefix ngẫu nhiên và workspace riêng, in bảng assertion PASS/FAIL và
+thoát mã 1 nếu có lỗi. Các request song song dùng kết nối riêng.
+
+Verifier chạy sau từng kịch bản trước khi dọn fixture. Hai kịch bản 3.9 và 3.10
+so khớp chính xác báo cáo hỏng dự kiến. Kịch bản 3.9 nạp biến thể Lua riêng và
+xóa biến thể sau khi thử lỗi.
+
+Để chạy 3.11, dùng `pnpm scenarios:reset` khi Redis spike đang rảnh. Lệnh chạy
+`seed --reset` trên prefix cấu hình, nạp lại library và chạy lại 3.1–3.10 với
+verifier sau từng kịch bản.
 
 ## Verifier
 

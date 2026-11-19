@@ -11,6 +11,8 @@
     "load": "tsx src/load.ts",
     "smoke": "tsx src/smoke.ts",
     "test": "vitest run",
+    "scenarios": "tsx scenarios/run-all.ts",
+    "scenarios:reset": "tsx scenarios/3.11-clean-run.ts",
     "verify": "tsx src/verify-task-indexes.ts"
   },
   "dependencies": {
