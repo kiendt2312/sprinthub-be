@@ -98,4 +98,4 @@ với Redis thật cô lập theo job.
 
 #### Scenario: Contract health tái lập
 - **WHEN** CI sinh OpenAPI từ cùng source hiện tại
-- **THEN** chỉ có các route health của change này, schema lỗi và header khớp contract, và bản diff so với `openapi.json` là rỗng
+- **THEN** hai probe health có schema lỗi và header khớp contract, mọi route nghiệp vụ xuất bản thuộc contract của change tương ứng, và bản diff so với `openapi.json` là rỗng

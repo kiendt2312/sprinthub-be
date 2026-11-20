@@ -1,0 +1,61 @@
+name: Backend checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  COREPACK_VERSION: 0.36.0
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+      - run: npm install --global corepack@"$COREPACK_VERSION"
+      - run: corepack pnpm install --frozen-lockfile
+      - run: corepack pnpm lint
+      - run: corepack pnpm typecheck
+      - run: corepack pnpm test:unit
+      - run: make openapi && git diff --exit-code -- openapi.json
+      - run: corepack pnpm exec openapi-typescript openapi.json --output /tmp/sprinthub-api-types.ts
+
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+      - run: npm install --global corepack@"$COREPACK_VERSION"
+      - run: corepack pnpm install --frozen-lockfile
+      - run: make redis-up
+        env:
+          COMPOSE_PROJECT_NAME: sprinthub-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      - run: make load
+      - run: corepack pnpm test:integration
+      - if: always()
+        run: if test -f .env; then docker compose --profile runtime down --volumes; fi
+        env:
+          COMPOSE_PROJECT_NAME: sprinthub-ci-${{ github.run_id }}-${{ github.run_attempt }}
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/repo:ro" zricethezav/gitleaks:v8.30.0@sha256:691af3c7c5a48b16f187ce3446d5f194838f91238f27270ed36eef6359a574d9 git --redact /repo
