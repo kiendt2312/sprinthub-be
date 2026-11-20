@@ -3,6 +3,8 @@ import type { OperationObject } from '@nestjs/swagger';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { LoginDto, PatchProfileDto, RegisterDto } from '../src/auth/auth.dto.js';
 import { AddWorkspaceMemberDto, CreateWorkspaceDto, PatchWorkspaceDto, TransferWorkspaceOwnerDto, UpdateWorkspaceRoleDto } from '../src/workspaces/workspace.dto.js';
+import { CreateProjectDto, PatchProjectDto, ProjectVersionDto } from '../src/projects/project.dto.js';
+import { AssignTaskDto, CreateTaskDto, DeleteTaskDto, MoveTaskDto, UpdateTaskDto } from '../src/tasks/task.dto.js';
 import { createApi } from '../src/api/app.js';
 import { readConfig } from '../src/platform/config.js';
 
@@ -19,12 +21,14 @@ try {
     .addCookieAuth('__Host-sh_session', { type: 'apiKey', in: 'cookie' }, 'session')
     .build());
   for (const dto of [LoginDto, PatchProfileDto, RegisterDto, CreateWorkspaceDto, PatchWorkspaceDto,
-    AddWorkspaceMemberDto, TransferWorkspaceOwnerDto, UpdateWorkspaceRoleDto]) {
+    AddWorkspaceMemberDto, TransferWorkspaceOwnerDto, UpdateWorkspaceRoleDto, CreateProjectDto, PatchProjectDto, ProjectVersionDto,
+    CreateTaskDto, UpdateTaskDto, AssignTaskDto, MoveTaskDto, DeleteTaskDto]) {
     const schema = document.components?.schemas?.[dto.name];
     if (!schema || '$ref' in schema) throw new Error(`Missing OpenAPI schema for ${dto.name}`);
     schema.additionalProperties = false;
-    if (dto === PatchProfileDto) schema.minProperties = 2;
-    if (dto === PatchWorkspaceDto) schema.minProperties = 2;
+    if (dto === PatchProfileDto || dto === PatchWorkspaceDto || dto === PatchProjectDto || dto === UpdateTaskDto) {
+      schema.minProperties = 2;
+    }
     if (dto === AddWorkspaceMemberDto) schema.oneOf = [
       { required: ['userId'], not: { required: ['email'] } },
       { required: ['email'], not: { required: ['userId'] } },

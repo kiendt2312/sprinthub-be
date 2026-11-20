@@ -23,7 +23,7 @@ export interface CurrentSession {
 }
 
 export interface AuthRateLimit {
-  policy: 'login-ip' | 'login-acct' | 'register' | 'write';
+  policy: 'login-ip' | 'login-acct' | 'register' | 'write' | 'board';
   subject: string;
   windowSeconds: number;
   limit: number;

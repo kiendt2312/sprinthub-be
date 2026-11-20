@@ -20,7 +20,7 @@ describe('runtime configuration', () => {
 
   it('defaults worker unassign batches to 50 and accepts overrides from 1 to 100', () => {
     const workerEnv = { REDIS_WORKER_URL: 'redis://sh-worker:placeholder@localhost' };
-    expect(readConfig('worker', workerEnv).unassignBatchSize).toBe(50);
+    expect(readConfig('worker', workerEnv).unassignBatchSize).toBe(32);
     for (const size of [1, 100]) {
       expect(readConfig('worker', { ...workerEnv, UNASSIGN_BATCH_SIZE: String(size) }).unassignBatchSize).toBe(size);
     }

@@ -4,6 +4,8 @@ import { readConfig } from '../src/platform/config.js';
 import { startupFailed } from '../src/platform/log.js';
 import { createKeys } from "../src/redis/keys.js";
 
+import { scanByPrefix } from './index-scan.js';
+
 type Client = RedisStore["client"];
 
 export type TaskIndexFinding = {
@@ -26,6 +28,10 @@ type TaskDoc = {
   projectId: string;
   status: string;
   key: string;
+  number?: number;
+  assigneeId?: string | null;
+  assigneeIndexValue?: string;
+  sprintId?: string | null;
   deletedAt?: unknown;
   isDeleted?: unknown;
 };
@@ -47,19 +53,11 @@ function active(task: TaskDoc) {
   return task.deletedAt == null && task.isDeleted !== "true" && task.isDeleted !== true;
 }
 
-async function scanByPrefix(client: Client, prefix: string) {
-  const pattern = `${prefix.replace(/[\\*?[\]]/g, "\\$&")}*`;
-  const found = new Set<string>();
-  for await (const batch of client.scanIterator({ MATCH: pattern, COUNT: 500 })) {
-    for (const key of batch) found.add(key);
-  }
-  return [...found].sort();
-}
-
 /** Read both directions against a quiescent keyspace. This function never repairs data. */
 export async function verifyTaskIndexes(
   client: Client,
   keys = createKeys(),
+  { legacy = false }: { legacy?: boolean } = {},
 ): Promise<TaskIndexReport> {
   const findings: TaskIndexFinding[] = [];
   const tasks = new Map<string, TaskDoc>();
@@ -87,7 +85,7 @@ export async function verifyTaskIndexes(
     pattern: string,
     redisType: string,
     readMembers: (key: string) => Promise<Iterable<string>>,
-    expectedIndex: (task: TaskDoc) => string,
+    expectedIndex: (task: TaskDoc) => string | undefined,
   ) {
     const locations = new Map<string, Set<string>>();
     for (const index of await scanByPrefix(client, `${keys.prefix}${pattern}:`)) {
@@ -113,7 +111,7 @@ export async function verifyTaskIndexes(
     for (const [taskId, task] of tasks) {
       if (!active(task)) continue;
       const index = expectedIndex(task);
-      if (!locations.get(taskId)?.has(index)) findings.push({ type: "missing", taskId, index });
+      if (index && !locations.get(taskId)?.has(index)) findings.push({ type: "missing", taskId, index });
     }
   }
 
@@ -131,6 +129,49 @@ export async function verifyTaskIndexes(
     }
     return rows.map(row => row.value);
   }, task => keys.board(task.projectId, task.status));
+
+  if (!legacy) {
+    await readActiveIndex("backlog", "zset", async index => {
+      const rows = await client.zRangeWithScores(index, 0, -1);
+      for (const { value: taskId, score } of rows) {
+        if (!Number.isInteger(score) || Math.abs(score) > MAX_SCORE) {
+          findings.push({ type: "bad-score", taskId, index, score: Number.isFinite(score) ? score : String(score) });
+        }
+      }
+      return rows.map(row => row.value);
+    }, task => task.sprintId == null ? keys.backlog(task.projectId) : undefined);
+    await readActiveIndex("user-assigned", "set", index => client.sMembers(index),
+      task => task.assigneeId ? keys.userAssigned(task.assigneeId) : undefined);
+
+    const projectMetadata = new Map<string, { key: unknown; workspaceId: unknown; counter: number }>();
+    for (const [taskId, task] of tasks) {
+      const index = keys.project(task.projectId);
+      let metadata = projectMetadata.get(task.projectId);
+      if (!metadata) {
+        const project = await client.type(index) === "ReJSON-RL"
+          ? await client.json.get(index) as { id?: unknown; key?: unknown; workspaceId?: unknown } | null : null;
+        const counterKey = keys.projectTaskSeq(task.projectId);
+        const rawCounter = await client.type(counterKey) === "string" ? await client.get(counterKey) : null;
+        const counter = rawCounter && /^(0|[1-9]\d*)$/.test(rawCounter) ? Number(rawCounter) : NaN;
+        metadata = { key: project?.id === task.projectId ? project.key : undefined, workspaceId: project?.workspaceId, counter };
+        projectMetadata.set(task.projectId, metadata);
+      }
+      if (metadata.workspaceId !== task.workspaceId || typeof metadata.key !== "string") {
+        findings.push({ type: "wrong-pointer", taskId, index, detail: "Project ID or workspace mismatch" });
+      } else if (typeof task.number !== "number" || !Number.isSafeInteger(task.number) || task.number < 1
+        || task.key !== `${metadata.key}-${task.number}` || !Number.isSafeInteger(metadata.counter) || task.number > metadata.counter) {
+        findings.push({ type: "wrong-pointer", taskId, index, detail: "Issue key or project sequence mismatch" });
+      }
+      if (task.isDeleted !== (task.deletedAt == null ? "false" : "true")
+        || (task.deletedAt != null && typeof task.deletedAt !== "string")) {
+        findings.push({ type: "wrong-pointer", taskId, detail: "Tombstone markers disagree" });
+      }
+      if (!(task.assigneeId === null || (typeof task.assigneeId === "string" && task.assigneeId.length > 0))
+        || task.assigneeIndexValue !== (task.assigneeId ?? "UNASSIGNED")) {
+        findings.push({ type: "wrong-pointer", taskId, detail: "Assignee markers disagree" });
+      }
+    }
+  }
 
   const workspaceEntries = new Map<string, Map<string, string>>();
   for (const index of await scanByPrefix(client, `${keys.prefix}workspace-task-keys:`)) {
@@ -160,7 +201,7 @@ export async function verifyTaskIndexes(
       const expected = expectedEntries.get(index)?.get(key);
       if (!task) {
         findings.push({ type: "orphan", taskId, key, index, expected });
-      } else if (index !== keys.workspaceTaskKeys(task.workspaceId) || key !== task.key) {
+      } else if (index !== keys.workspaceTaskKeys(task.workspaceId) || key !== task.key || expected !== taskId) {
         findings.push({ type: "wrong-pointer", taskId, key, index, expected, actual: taskId });
       }
     }
@@ -169,12 +210,12 @@ export async function verifyTaskIndexes(
 }
 
 async function main() {
-  const { values } = parseArgs({ options: { "report-only": { type: "boolean" } } });
+  const { values } = parseArgs({ options: { "report-only": { type: "boolean" }, legacy: { type: "boolean" } } });
   const redis = new RedisStore(readConfig('maintenance'), 'maintenance');
   const { client } = redis;
   await redis.connect();
   try {
-    const report = await verifyTaskIndexes(client, redis.keys);
+    const report = await verifyTaskIndexes(client, redis.keys, { legacy: values.legacy });
     console.log(JSON.stringify(report, null, 2));
     if (!values["report-only"] && !report.ok) process.exitCode = 1;
   } finally {

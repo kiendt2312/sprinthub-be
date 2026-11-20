@@ -262,11 +262,11 @@ Trong cùng Function: `HGET workspace-members newAssignee` (không còn là memb
 1. Function (theo quy ước chung, có `Idempotency-Key`: gửi lại cùng key chỉ có một event): `HDEL workspace-members`, `SREM user-workspaces`, audit, event `MEMBER_REMOVED`. Quyền bị thu hồi ngay từ đây.
 2. Worker nhận `MEMBER_REMOVED` → `JSON.SET job:{id} $ … NX` (id suy từ `eventId`, nên giao lại không tạo job thứ hai) → **rồi mới** `XACK`. Crash trước `JSON.SET` thì event được giao lại; crash sau thì job đã bền.
 3. Worker lấy lock `lock:unassign:{ws}:{user}` kèm `epoch = INCR fence:unassign:{ws}:{user}`; khởi động lại thì quét `job:*` chưa xong (ngoài request path) và chạy tiếp từ tiến độ đã lưu.
-4. Worker mặc định gửi tối đa 50 task mỗi `FCALL` kèm epoch.
+4. Worker mặc định gửi tối đa 32 task mỗi `FCALL` kèm epoch.
    `UNASSIGN_BATCH_SIZE` nhận số nguyên từ 1 đến 100. Function chặn batch vượt
    100. Batch 100 task từng đo tới 3,437 ms và vượt ngân sách 5 ms khi chạy lại
-   integration trên máy đang tải. Batch mặc định 50 task đo tối đa 1,969 ms
-   trong bốn lượt nghiệm thu trên cùng volume Redis.
+   integration trên máy đang tải. Batch 50 task từng đo tối đa 1,969 ms ở workspace v4. Khi nghiệm thu
+   library v5, một lượt đo đến 2,965 ms nên mặc định giảm xuống 32 để giữ biên 2,5 ms.
    Function từ chối epoch cũ (fencing) và kiểm lại từng task. Task phải thuộc
    workspace của job vì `user-assigned:{userId}` dùng chung mọi workspace.
    Task vẫn phải được gán cho user đã bị gỡ. Nếu user đã được thêm lại, worker

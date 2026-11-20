@@ -6,9 +6,8 @@ nhất**. Đây cũng là **repo trung tâm**: mọi session làm việc mở �
 sửa các repo khác.
 
 Trạng thái P0. Spike lõi Redis đã hoàn tất ([báo cáo](spikes/redis-core/REPORT.md)).
-Nền NestJS API/worker, auth session và Platform Admin CLI đã archive. Workspace,
-membership và worker unassign nằm trong change
-[workspaces-and-membership](openspec/changes/workspaces-and-membership/).
+Nền NestJS API/worker, auth session, Platform Admin CLI, workspace, membership
+và worker unassign đã archive. Spec hiện hành nằm trong [openspec/specs/](openspec/specs/).
 
 ## Bản đồ repo
 

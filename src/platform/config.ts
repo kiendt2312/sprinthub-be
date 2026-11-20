@@ -1,8 +1,8 @@
 import { isIP } from 'node:net';
 
 export type ProcessRole = 'api' | 'worker' | 'maintenance';
-export const LIB_VERSION = 4;
-export const DEFAULT_UNASSIGN_BATCH_SIZE = 50;
+export const LIB_VERSION = 5;
+export const DEFAULT_UNASSIGN_BATCH_SIZE = 32;
 const MAX_UNASSIGN_BATCH_SIZE = 100;
 
 export class ConfigError extends Error {
