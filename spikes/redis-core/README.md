@@ -3,7 +3,7 @@
 Chứng minh Redis Functions giữ dữ liệu SprintHub đúng khi ghi song song, restart và
 retry; đo latency và bộ nhớ; chốt bản Redis 8.x và `appendfsync`.
 
-Kế hoạch và tiêu chí nằm trong [OpenSpec](../../openspec/changes/spike-redis-core).
+Kế hoạch và tiêu chí nằm trong [OpenSpec](../../openspec/changes/archive/2026-11-19-spike-redis-core).
 Bản Redis đã pin và môi trường kiểm tra được ghi trong [REPORT.md](REPORT.md).
 
 ## Chạy

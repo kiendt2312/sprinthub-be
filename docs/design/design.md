@@ -178,7 +178,7 @@ Redis không có foreign key, nên 19 điều dưới đây là “ràng buộc�
 | Atomicity | Transaction + rollback | Function nguyên tử, không rollback |
 | Consistency | FK, unique, check | Invariant trong Function + verifier |
 | Isolation | Mức cô lập | Redis thực thi tuần tự một luồng |
-| Durability | WAL fsync mỗi commit | AOF `everysec`: có thể mất \~1 s |
+| Durability | WAL fsync mỗi commit | AOF `appendfsync always`: fsync trước khi trả ACK |
 
 ## Luồng nghiệp vụ
 
@@ -289,7 +289,7 @@ Mỗi request đọc phải nằm trong ngân sách round trip cố định. Red
 
 | Màn hình | Cách đọc | Round trip |
 | --- | --- | --- |
-| Guard mọi request | Pipeline: `HGETALL session` + `INCR ratelimit`; membership kiểm ở batch sau khi đã biết workspace thật | 1 |
+| Guard phiên | Pipeline: `HGETALL session:{digest}` + `INCR` nếu key quota đã biết. Xác thực từ HASH; touch TTL ngoài đường găng. Membership kiểm ở batch sau khi đã biết workspace thật | 1 |
 | Board | Batch 1: guard. Batch 2: `JSON.GET project:{p} $.workspaceId` + 4×`ZRANGE` (×`ZINTER` khi có sprint). Batch 3: `HGET workspace-members` + pipeline `JSON.GET task:{id} $.workspaceId $.projectId $.status $.isDeleted $.key $.title $.priority $.assigneeId $.dueAtMs $.labelIds $.version` cho từng task; không phải member thì không trả gì. Mỗi path trả một mảng (`[null]` khi giá trị null, `[]` khi thiếu path); task đã xóa, đã đổi cột hoặc khác tenant giữa hai batch thì bỏ qua. `JSON.MGET` chỉ nhận một path nên không dùng; không lấy description | 3 |
 | Chi tiết task | `JSON.GET` + `ZREVRANGE task-comments` + `task-activity` (pipeline) | 1–2 |
 | Backlog | `ZRANGE backlog` theo cursor → `JSON.MGET` | 2 |
@@ -325,7 +325,9 @@ Quyền luôn do server suy ra từ session và membership; client không bao gi
 
 - Token ngẫu nhiên 256-bit trong cookie `HttpOnly; Secure; SameSite=Lax`. Redis lưu `session:{sha256(token)}`, TTL trượt 7 ngày, tuyệt đối 30 ngày.
 - Đổi token khi login và khi đổi quyền. Không dùng JWT; không có `/auth/refresh` riêng (TTL trượt đã thay). Không cần `SESSION_SECRET` vì token là opaque và chỉ được hash.
-- Same-origin qua Next.js rewrite; mutation cần header CSRF. Mọi request kiểm tra `user.disabledAt`.
+- Guard dùng một pipeline Redis và xác thực từ `userId`, `expiresAtMs` và `absoluteExpiresAtMs` trong HASH. Suspend/revoke thu hồi mọi phiên trong cùng Function. Function login kiểm `user.disabledAt` khi tạo phiên.
+- Gia hạn TTL ngoài đường găng khi `lastSeenAtMs` cũ hơn ngưỡng cấu hình mặc định 10 phút. Touch kiểm lại owner, index và thời hạn. Lỗi touch chỉ ghi log.
+- Same-origin qua Next.js rewrite. Mutation POST/PATCH/DELETE cần `X-CSRF-Protection: 1` và `Origin` khớp cấu hình. GET được miễn kiểm CSRF.
 - **Retry của auth không dùng cache response** (không lưu token phiên ở đâu ngoài `session:{sha256}`): register an toàn khi retry nhờ `user-email` unique trong Function (retry trả cùng response chung); login mỗi lần thành công tạo session mới, retry chỉ sinh thêm session có TTL; logout/logout-all gọi lại nhiều lần vẫn cùng kết quả. Rate limit vẫn áp cho mọi lần thử.
 - Sau suspend, revoke hoặc logout-all, cookie cũ không còn ánh xạ tới user nên trả `401 SESSION_INVALID`. User đã suspend đăng nhập thì `401 USER_SUSPENDED`. Function tạo session kiểm `disabledAt` ngay bên trong, nên login không chạy chen được với suspend. Logout bằng session đã bị thu hồi vẫn trả `204`.
 - Register trả cùng một response dù email đã tồn tại hay chưa. Đổi mật khẩu (`POST /users/me/password`) cần mật khẩu cũ + sudo và thu hồi mọi session khác.
