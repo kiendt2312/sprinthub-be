@@ -12,6 +12,7 @@ hệ thống nằm trong Redis SET và tách khỏi membership workspace (ADR-00
 
 - Đăng ký duy nhất theo email khi chạy song song. Thu hồi phiên có hiệu lực ở
   request kế tiếp, kể cả khi login chạy đồng thời với CLI suspend (invariant 14, 16).
+- Guard xác thực bằng một batch Redis để giữ ngân sách đọc board ≤ 3 batch.
 - Grant/revoke/suspend bảo vệ admin active cuối bằng Redis Function (invariant 15).
 - Hồ sơ chỉ cho phép các field công khai, locale EN/VI, bảo vệ version và retry
   theo hợp đồng mutation của dự án (invariant 8, 17).
@@ -52,13 +53,28 @@ hệ thống nằm trong Redis SET và tách khỏi membership workspace (ADR-00
   của đích, người dùng đăng nhập lại nhận token mới.
 - `session:{digest}` là HASH chứa `userId`, ID công khai ngẫu nhiên `ses_<ULID>`,
   `createdAtMs`, `lastSeenAtMs`, `expiresAtMs`, `absoluteExpiresAtMs`; TTL
-  tuyệt đối 30 ngày. Mỗi request đã xác thực cập nhật `lastSeenAtMs` và
-  `PEXPIREAT` tới `min(now + 7 ngày, absoluteExpiresAtMs)`. Dùng Redis TIME
-  trong Function cho thời gian phiên, so cả deadline lưu trong HASH khi đọc.
-  Auth guard tra owner theo digest để dựng KEYS, rồi dùng `sh_touch_session`
-  kiểm lại owner, index, thời hạn và `disabledAt` trong cùng Function. Tra owner
-  và touch là hai lượt Redis vì token không mang user ID. Cookie thiếu, sai định
-  dạng, hết hạn hoặc đã thu hồi trả `SESSION_INVALID` trên route cần session.
+  tuyệt đối 30 ngày. Guard xác thực bằng một batch gồm `HGETALL session:{digest}`
+  và `INCR` quota của route nếu đã biết key quota trước khi đọc phiên. Với
+  fixed window, gửi `EXPIRE NX` cùng pipeline. Guard quyết định từ `userId`,
+  `expiresAtMs` và `absoluteExpiresAtMs` trong HASH. Cần userId hợp lệ và cả
+  hai hạn còn hiệu lực. Guard không gọi FCALL, đọc user JSON hoặc cache
+  session trong process. Cookie thiếu, sai định dạng, hết hạn
+  hoặc đã thu hồi trả `401 SESSION_INVALID` trên route bảo vệ. Board dùng
+  batch 1 cho guard, batch 2 đọc project + ZSET và batch 3 kiểm membership +
+  đọc task (T-021). [Redis pipelines](https://redis.io/docs/latest/develop/clients/nodejs/transpipe/).
+- Suspend thu hồi tất cả phiên và đánh dấu user disabled trong cùng Function.
+  Revoke quyền và revoke-sessions cũng xóa toàn bộ phiên của target ngay
+  trong Function. Theo invariant 14, HASH phiên còn hiệu lực là đủ để xác
+  thực user ở guard, còn Function login vẫn kiểm `disabledAt` trước khi tạo
+  phiên. Sau khi suspend commit, cookie cũ nhận `401 SESSION_INVALID` ở
+  request kế tiếp.
+- Chỉ khi `lastSeenAtMs` cũ hơn ngưỡng cấu hình (mặc định 10 phút), xử lý
+  gia hạn sau khi gửi response. `sh_touch_session` dùng Redis TIME, kiểm HASH
+  còn tồn tại, đúng owner, có trong index, còn hạn và vẫn vượt ngưỡng.
+  Sau đó cập nhật `lastSeenAtMs`, `expiresAtMs` và đặt `PEXPIREAT` tới
+  `min(now + 7 ngày, absoluteExpiresAtMs)`. Touch đồng thời hoặc touch sau
+  thu hồi/hết hạn có thể trả no-op. Lỗi chỉ ghi log theo requestId. Touch không
+  chặn response hay tự gọi lại khi mất reply. Phần lớn request chỉ đọc phiên.
 - `user-sessions:{uid}` là SET các digest. Giới hạn 32 mục/user để có thể
   khai đủ key và thu hồi trong một FCALL dưới 5 ms. Hash đã hết TTL có thể để
   lại member; list bỏ qua, login đối chiếu và dọn member stale khi tạo phiên.
@@ -70,21 +86,24 @@ hệ thống nằm trong Redis SET và tách khỏi membership workspace (ADR-00
   các phiên khác. Timeout trả 503 và giữ cookie. Route bảo vệ đọc Redis lại
   ở request kế tiếp. Request đã qua guard có thể chạy tiếp. Function sửa hồ sơ
   và thu hồi phiên tự phục vụ kiểm session lại trước khi ghi.
-- CSRF áp cho cả các route có side effect gia hạn phiên. Mọi route phải
-  gửi `X-CSRF-Protection: 1`. POST/PATCH, kể cả login/register/logout, bắt
-  buộc thêm `Origin` đúng origin công khai đã cấu hình gồm scheme/host/port.
-  GET cùng origin có thể thiếu Origin, nhưng nếu gửi thì phải khớp. Header
-  thiếu/sai hoặc Origin không đạt trả `403 CSRF_INVALID` trước khi kiểm
-  session, touch TTL hoặc tính quota. Không mở CORS cho các route này, nên
-  browser ở origin khác không thể gửi header tùy chỉnh kèm cookie.
-  So với cấu hình tĩnh, không suy từ `Host` hay `X-Forwarded-Host`. FE gọi
-  cùng origin qua rewrite và giữ `Origin`. Dùng HTTPS khi kiểm cookie trong browser.
+- CSRF chỉ áp cho mutation HTTP POST/PATCH/DELETE, kể cả login, register
+  và logout. Mutation bắt buộc `X-CSRF-Protection: 1` và `Origin` khớp origin
+  công khai đã cấu hình gồm scheme/host/port. Thiếu hoặc sai trả
+  `403 CSRF_INVALID` trước khi kiểm session hoặc tính quota. GET dùng cookie
+  hợp lệ và được miễn kiểm CSRF. Gia hạn điều tiết là tác vụ nội bộ. Các
+  route này chạy cùng origin qua FE rewrite, giữ `Origin` và không mở CORS.
+  Khi đối chiếu với cấu hình tĩnh,
+  tránh suy origin từ `Host` hay `X-Forwarded-Host`. Dùng HTTPS khi kiểm cookie
+  trong browser.
   [OWASP CSRF Prevention](https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html).
 
 ### Limiter và hồ sơ
 
-- Limiter dùng `INCR` + `EXPIRE NX` trong Function. Fixed window bắt đầu từ
-  request đầu của key. Giữ key không có hậu tố window theo bảng rate limit
+- Limiter login/register và ghi hồ sơ dùng `INCR` + `EXPIRE NX` trong
+  `sh_take_auth_rate_limit` ở tầng ứng dụng. PATCH cần `userId` từ guard để
+  tính quota 120/phút theo user. Đây là bước của mutation sau guard, không
+  phát sinh batch xác thực thứ hai. Board giữ ngân sách ba batch. Fixed
+  window bắt đầu từ request đầu của key. Giữ key không có hậu tố window theo bảng rate limit
   chi tiết v1.7. Login tính cả hai cửa sổ (IP 20/900 giây, tài khoản 5/900 giây)
   cho mọi lần thử hợp lệ về CSRF/DTO, kể cả login thành công, email không tồn
   tại và retry. Register 3/3.600 giây theo IP; PATCH hồ sơ 120/60 giây theo user.
@@ -126,8 +145,9 @@ hệ thống nằm trong Redis SET và tách khỏi membership workspace (ADR-00
   trên toàn snapshot dưới 5 ms. Revoke gỡ membership, suspend giữ membership
   và tắt user, reactivate bật lại user. Revoke/suspend admin active bị từ chối
   bằng `LAST_PLATFORM_ADMIN` nếu không có admin active khác ngay trong Function.
-  Suspend đặt `disabledAt/suspendedBy` và xóa mọi phiên. Reactivate không phục
-  hồi phiên; nếu còn index phiên do lỗi ghi dở, CLI revoke-sessions xử lý trước
+  Suspend xóa mọi phiên trước khi đặt `disabledAt/suspendedBy`, trong cùng
+  Function. Reactivate chỉ cho phép tạo phiên mới qua login. Nếu phát hiện
+  index phiên còn sót trên user disabled, CLI revoke-sessions xử lý trước
   khi reactivate. Grant/revoke có thay đổi cũng thu hồi phiên của target.
 - Function chỉ chấp nhận setting `registrationEnabled` với giá trị `1|0`;
   field thiếu nghĩa là bật. Đổi setting và register dùng cùng key, thứ tự
@@ -161,7 +181,7 @@ target hoặc actor có mặt trong snapshot giữ đúng thứ tự trong bản
 | `sh_register_user` | `C, E(emailDigest), U(uid), users-by-created` | uid, emailDigest, normalizedEmail, displayEmail, passwordHash, displayName |
 | `sh_take_auth_rate_limit` | login: `ratelimit:login-ip:{ipHash}, ratelimit:login-acct:{emailDigest}`; register: `ratelimit:register:{ipHash}`; write: `ratelimit:write:{uid}` | scope `login\|register\|write`, ipHash hoặc uid, emailDigest hoặc rỗng |
 | `sh_create_session` | `E(emailDigest), U(uid), I(uid), S(newDigest), S(ds…)` | uid, emailDigest, newDigest, publicSessionId, priorDigest hoặc rỗng, sessionDigestsJson |
-| `sh_touch_session` | `S(digest), U(uid), I(uid)` | uid, digest |
+| `sh_touch_session` | `S(digest), I(uid)` | uid, digest, touchIntervalMs |
 | `sh_logout_session` | `S(digest), U(uid), I(uid)` | uid, digest |
 | `sh_logout_all_sessions` | `S(digest), U(uid), I(uid), S(ds…)` | uid, digest, sessionDigestsJson |
 | `sh_update_my_profile` | `S(digest), U(uid), I(uid), idempotency:{uid}:{key}` | uid, digest, expectedVersion, patchJson, idempotencyKey, requestHash |
@@ -183,9 +203,11 @@ target hoặc actor có mặt trong snapshot giữ đúng thứ tự trong bản
   đọc từng key đã khai báo. Admin count đọc trạng thái từng user ngay lúc gọi
   dù SET không đổi. Session check đối chiếu owner của mọi HASH còn tồn tại trước
   khi xóa, rồi dọn được cả member đã mất HASH. Function xóa HASH trước index.
-  Suspend đặt disabled trước khi thu hồi. Login chuẩn bị mọi thứ trước ghi, thêm index cho session mới
-  trước khi tạo HASH + TTL, và dọn phiên cũ theo plan đã kiểm. Nếu đã biết chưa
-  gửi, trả lỗi foundation. Nếu mất reply, không gọi lại mù.
+  Suspend chuẩn bị sẵn payload cập nhật user, xóa mọi HASH phiên và index
+  trước khi đặt disabled. Redis không rollback lệnh đã chạy, nên thứ tự này
+  bảo vệ invariant 14 ngay cả nếu lỗi giữa chừng. Login thêm index cho phiên
+  mới trước khi tạo HASH + TTL và dọn phiên cũ theo plan đã kiểm.
+  Nếu đã biết chưa gửi, trả lỗi foundation. Nếu mất reply, không gọi lại mù.
 - **Commit và reply:** dùng chuỗi JSON `{"ok":true,"data":…,"seq":null}` và
   `{"ok":false,"code":…,"params":…}`. Mở rộng decoder của foundation cho
   success `seq:null` ở nhóm Function global, giữ số nguyên cho wrapper
@@ -209,16 +231,12 @@ target hoặc actor có mặt trong snapshot giữ đúng thứ tự trong bản
 - Session SET giữ member TTL đã hết cho tới lượt login hoặc thu hồi; trần và
   pipeline giới hạn chi phí. Dùng SLOWLOG ngưỡng 0 với 32 phiên và 16 admin
   để nghiệm thu max < 5 ms. Mỗi nhánh từ chối nghiệp vụ giữ nguyên dữ liệu,
-  ngoại trừ cập nhật quota có chủ đích và TTL được touch khi request được
-  xác thực. So snapshot ở biên FCALL khi kiểm nhánh từ chối.
-- v1.7 mô tả guard board trong một batch, còn lookup theo digest và kiểm
-  lại user trong Function cần hai lượt. Change board P0 phải giữ tổng ≤ 3
-  batch và đo T-021. Cách ghép dự kiến là batch 1 tra session; batch 2
-  ghép touch/kiểm user với đọc project + ZSET; batch 3 kiểm membership
-  và lấy task. Chỉ trả dữ liệu sau khi session và membership hợp lệ.
-- AOF lưu cả ghi dở do Lua lỗi. Preflight trước ghi, thu hồi hash trước
-  index, giữ user disabled nếu index chưa dọn và chạy verifier offline của
-  auth kiểm chéo user/email/created index, phiên còn hiệu lực và admin active.
+  ngoại trừ cập nhật quota có chủ đích. So snapshot ở biên FCALL khi kiểm
+  nhánh từ chối. Touch chạy ngoài ba batch đồng bộ của board.
+- AOF lưu cả ghi dở do Lua lỗi. Nếu suspend lỗi trước khi đặt disabled,
+  một phần phiên có thể đã bị thu hồi, user vẫn active. Nếu đã đặt disabled
+  thì mọi HASH phiên đã bị xóa. Verifier offline kiểm chéo user/email/created
+  index, phiên còn hiệu lực và admin active.
   Test tiêm lỗi kiểm báo cáo đúng; không tự apply repair trong change này.
 - Login retry sau mất reply có thể để lại phiên còn TTL. Người dùng kiểm qua
   GET sessions và thu hồi bằng logout-all; register trùng vẫn phản hồi chung,

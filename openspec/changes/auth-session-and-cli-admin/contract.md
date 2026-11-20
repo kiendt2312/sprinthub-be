@@ -12,15 +12,18 @@ và header vào contract hiện có.
 - JSON body dùng `Content-Type: application/json`. Body ngoài schema, sai kiểu
   hoặc malformed trả `400 VALIDATION_FAILED`. Route ghi có schema body rỗng
   thì chấp nhận request không body hoặc JSON `{}`.
-- Mọi route cần `X-CSRF-Protection: 1`. Với POST/PATCH, `Origin` phải có
-  và khớp origin app đã cấu hình. Với GET, browser cùng origin có thể bỏ
-  `Origin`. Nếu gửi `Origin`, giá trị phải khớp. Vi phạm trả
-  `403 CSRF_INVALID` trước khi kiểm session hoặc gia hạn TTL.
+- Mutation POST/PATCH/DELETE, kể cả login, register và logout, cần
+  `X-CSRF-Protection: 1` và `Origin` khớp origin app đã cấu hình. Vi phạm
+  trả `403 CSRF_INVALID` trước khi kiểm session hoặc tính quota. GET được
+  miễn các header CSRF này.
 - Cookie auth `__Host-sh_session` là chuỗi opaque base64url 32 byte.
   `Set-Cookie` khi login gồm `HttpOnly; Secure; SameSite=Lax; Path=/;
   Max-Age=2592000`, không có `Domain`. Logout/logout-all xóa cookie với
-  thuộc tính tương đương và `Max-Age=0`. TTL phía server là 7 ngày trượt
-  tính từ lượt xác thực gần nhất, tối đa 30 ngày từ lúc tạo.
+  thuộc tính tương đương và `Max-Age=0`. TTL phía server là 7 ngày trượt,
+  tối đa 30 ngày từ lúc tạo. BE gia hạn ở nền khi lần ghi nhận hoạt động
+  cuối đã quá 10 phút (ngưỡng cấu hình được). Response có thể trả trước khi
+  `lastSeenAtMs` và `expiresAtMs` được cập nhật. Cookie cũ bị thu hồi do
+  suspend/revoke nhận `401 SESSION_INVALID` ngay ở request bảo vệ kế tiếp.
 - Bốn route `/auth/*` không yêu cầu `Idempotency-Key` hoặc
   `X-Client-Mutation-Id`. Cookie session là cơ chế xác thực của các route cần
   session. Guest không truyền token qua header hoặc JSON.
@@ -65,10 +68,10 @@ hóa hoặc mutation ID trả 422. Profile version có thể tăng khi login ghi
 ## Mã lỗi và rate headers
 
 Mỗi lỗi dùng `{"error":{"code":"…","params":{…}},"requestId":"…"}`. Mã trong
-bảng route cộng với 400 theo schema, 403 CSRF theo yêu cầu chung, 500 khi lỗi nội bộ và
-503 lỗi Redis theo contract nền. `MUTATION_OUTCOME_UNKNOWN` chỉ dùng khi backend
-có thể đã gửi một lệnh ghi, kể cả lệnh touch session ở route GET. Auth tự
-áp dụng ngữ nghĩa retry ở bảng route. PATCH dùng lại cùng key và mutation ID
+bảng route cộng với 400 theo schema, 403 CSRF cho mutation, 500 khi lỗi
+nội bộ và 503 lỗi Redis theo contract nền. `MUTATION_OUTCOME_UNKNOWN` áp cho
+lệnh ghi trên đường xử lý request. Lỗi gia hạn phiên ở nền chỉ ghi log.
+Auth tự áp dụng ngữ nghĩa retry ở bảng route. PATCH dùng lại cùng key và mutation ID
 sau khi nhận 503 không rõ kết quả.
 
 | Status | Code | Params | Điều kiện |
@@ -77,7 +80,7 @@ sau khi nhận 503 không rõ kết quả.
 | `401` | `USER_SUSPENDED` | `{}` | Credential đúng nhưng Function tạo phiên thấy tài khoản suspended |
 | `401` | `SESSION_INVALID` | `{}` | Cookie thiếu, sai, hết hạn, đã thu hồi hoặc không còn hợp lệ |
 | `403` | `REGISTRATION_DISABLED` | `{}` | Đăng ký tắt tại thời điểm Function chạy |
-| `403` | `CSRF_INVALID` | `{}` | Origin hoặc CSRF header không đạt yêu cầu chung |
+| `403` | `CSRF_INVALID` | `{}` | Mutation thiếu hoặc sai Origin hay header CSRF |
 | `409` | `SESSION_LIMIT_REACHED` | `{limit:32}` | Tạo thêm phiên vượt trần của user |
 | `409` | `USER_VERSION_CONFLICT` | `{currentVersion:integer}` | PATCH mới với version không khớp |
 | `422` | `IDEMPOTENCY_KEY_REUSED` | `{}` | Dùng lại key của PATCH với payload khác |

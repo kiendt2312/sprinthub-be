@@ -47,13 +47,18 @@ suspend không được tính. Grant SHALL giữ SET trong trần 16 thành viê
 ### Requirement: Admin quản lý trạng thái tài khoản và session
 
 CLI SHALL hỗ trợ grant, revoke, suspend, reactivate và revoke-sessions.
-Suspend SHALL đặt disabledAt, thu hồi mọi phiên và chặn lần login kế tiếp.
+Suspend SHALL thu hồi mọi phiên trước khi đặt `disabledAt` trong cùng
+Function và chặn lần login kế tiếp.
 Grant/revoke thay đổi quyền SHALL thu hồi các token của target; reactivate cho
 phép login mới và SHALL không phục hồi token cũ.
 
 #### Scenario: Suspend user có hai thiết bị rồi reactivate
-- **WHEN** operator suspend user đang login hai thiết bị rồi reactivate
-- **THEN** cả hai cookie cũ nhận `401 SESSION_INVALID` kể cả sau reactivate; login trước reactivate nhận `401 USER_SUSPENDED`, login mới sau reactivate thành công
+- **WHEN** operator suspend user đang login hai thiết bị rồi thử lại hai cookie cũ trước và sau reactivate
+- **THEN** cả hai cookie cũ nhận `401 SESSION_INVALID` ở request kế tiếp sau suspend và sau reactivate; login trước reactivate nhận `401 USER_SUSPENDED`, login mới sau reactivate thành công
+
+#### Scenario: Suspend lỗi trong lúc thu hồi phiên
+- **WHEN** test tiêm lỗi sau khi xóa một HASH phiên nhưng trước khi hoàn tất thu hồi các phiên còn lại
+- **THEN** Function báo lỗi và user vẫn active; không có user disabled còn phiên hợp lệ
 
 #### Scenario: Thu hồi phiên khi đổi quyền
 - **WHEN** operator grant hoặc revoke quyền của user đang có phiên

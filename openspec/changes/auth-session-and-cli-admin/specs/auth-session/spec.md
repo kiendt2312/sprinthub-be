@@ -47,14 +47,36 @@ SHALL nhận chung `401 INVALID_CREDENTIALS`.
 
 ### Requirement: Phiên trượt có giới hạn tuyệt đối
 
-Guard SHALL kiểm session và trạng thái user từ Redis mỗi request, gia hạn
-phiên hợp lệ tới `min(now+7 ngày, createdAt+30 ngày)`. Cookie không hợp lệ
-SHALL nhận `401 SESSION_INVALID` trên route bảo vệ. BE SHALL không cache phiên
-trong process.
+Guard SHALL xác thực trong một batch từ `userId`, `expiresAtMs` và
+`absoluteExpiresAtMs` của HASH phiên. Guard SHALL không gọi FCALL hay đọc
+`disabledAt`. Cookie không hợp lệ SHALL nhận `401 SESSION_INVALID`.
+BE SHALL chỉ gia hạn ngoài đường găng nếu `lastSeenAtMs` cũ hơn ngưỡng
+cấu hình mặc định 10 phút, tối đa tới ngày 30. Touch SHALL kiểm lại owner,
+index và thời hạn, và chỉ ghi log khi lỗi.
+
+#### Scenario: Guard xác thực trong một batch
+- **WHEN** request dùng cookie hợp lệ và quota có key đã xác định trước khi tra phiên
+- **THEN** trace đồng bộ của guard chỉ có một pipeline với HGETALL và INCR, không có FCALL hoặc đọc JSON user
+
+#### Scenario: Touch theo ngưỡng 10 phút
+- **WHEN** hai lượt request dùng phiên hợp lệ, một lượt có lastSeenAtMs chưa quá ngưỡng và một lượt có lastSeenAtMs đã quá ngưỡng
+- **THEN** lượt đầu giữ nguyên phiên; lượt sau trả response dù touch còn chờ, rồi touch thành công gia hạn tới tối đa 7 ngày từ lúc touch
 
 #### Scenario: Gia hạn sát giới hạn tuyệt đối
-- **WHEN** phiên hợp lệ ở ngày 29 được dùng trên route bảo vệ
+- **WHEN** phiên hợp lệ ở ngày 29 đã quá ngưỡng touch và được dùng trên route bảo vệ
 - **THEN** Redis chỉ gia hạn tới ngày 30; request sau deadline nhận `401 SESSION_INVALID`
+
+#### Scenario: Touch đã lên lịch gặp phiên thu hồi
+- **WHEN** suspend xóa HASH phiên sau khi touch đã được lên lịch nhưng trước khi Function touch chạy
+- **THEN** touch trả no-op và HASH phiên vẫn vắng mặt
+
+#### Scenario: Redis lỗi khi gia hạn ở nền
+- **WHEN** request hợp lệ đã gửi response và Function touch gặp lỗi Redis
+- **THEN** response giữ kết quả của request và lỗi touch được ghi log theo requestId
+
+#### Scenario: Dùng cookie cũ ngay sau suspend
+- **WHEN** CLI suspend đã commit và client dùng cookie cũ ở request bảo vệ kế tiếp
+- **THEN** guard nhận HASH trống và trả `401 SESSION_INVALID` ngay trong đường xác thực một batch
 
 #### Scenario: Không hoạt động bảy ngày
 - **WHEN** phiên có TTL trượt đã hết và client vẫn gửi cookie
@@ -74,19 +96,19 @@ cookie nếu cookie hết hạn, không có hoặc đã bị thu hồi.
 - **WHEN** A logout-all khi còn phiên B rồi gửi lại cùng cookie cũ
 - **THEN** cả hai request trả 204, cookie A và B đều nhận `401 SESSION_INVALID` ở route bảo vệ, phiên của user khác giữ nguyên
 
-### Requirement: CSRF kiểm trước mọi thao tác đổi trạng thái
+### Requirement: CSRF bảo vệ HTTP mutation
 
-Mọi route của change SHALL yêu cầu `X-CSRF-Protection: 1`. POST/PATCH SHALL
-yêu cầu `Origin` khớp cấu hình, GET SHALL kiểm giá trị này khi header có mặt.
-Lỗi SHALL trả `403 CSRF_INVALID` trước limiter, cập nhật TTL hoặc ghi nghiệp vụ.
+POST/PATCH/DELETE SHALL yêu cầu `X-CSRF-Protection: 1` và `Origin` khớp
+cấu hình, kể cả login, register và logout. Lỗi SHALL trả `403 CSRF_INVALID`
+trước limiter hoặc ghi nghiệp vụ. GET SHALL xác thực mà không yêu cầu CSRF.
 
 #### Scenario: Origin khác hoặc thiếu header
-- **WHEN** browser gửi cookie đến một POST/PATCH với origin khác, hoặc thiếu header CSRF
+- **WHEN** browser gọi mutation với origin khác hoặc thiếu header CSRF
 - **THEN** request nhận 403 và snapshot Redis không đổi
 
-#### Scenario: GET thiếu header CSRF
-- **WHEN** GET profile hoặc sessions gửi cookie hợp lệ nhưng thiếu header CSRF
-- **THEN** API trả `403 CSRF_INVALID`, lastSeenAtMs và hạn tuyệt đối của TTL Redis giữ nguyên
+#### Scenario: GET không có header CSRF
+- **WHEN** GET profile hoặc sessions gửi cookie hợp lệ mà không gửi header CSRF hay Origin
+- **THEN** API trả 200 và xử lý gia hạn phiên theo ngưỡng hoạt động
 
 ### Requirement: Quota auth lưu trong Redis
 

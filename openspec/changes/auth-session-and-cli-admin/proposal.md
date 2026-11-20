@@ -9,8 +9,10 @@ US-10 (CLI) và US-22 (locale).
 ## What Changes
 
 - Thêm đăng ký Argon2id với phản hồi chung khi trùng email, đăng nhập với cookie
-  session opaque, logout/logout-all và danh sách phiên. Bổ sung kiểm tra CSRF,
-  giới hạn login theo IP và tài khoản, giới hạn register theo IP.
+  session opaque, logout/logout-all và danh sách phiên. Guard xác thực trong
+  một batch Redis. Gia hạn TTL ngoài đường găng khi lần ghi nhận hoạt động
+  gần nhất đã quá 10 phút (cấu hình được). Áp CSRF cho mutation, giới hạn
+  login theo IP và tài khoản, và giới hạn register theo IP.
 - Thêm `GET/PATCH /users/me` để đọc hồ sơ và lưu displayName, avatarUrl, locale.
   BE trả mã lỗi và tham số để FE dịch EN/VI.
 - Thêm CLI Platform Admin qua SSH dùng `sh-maint`: grant, revoke, suspend,
