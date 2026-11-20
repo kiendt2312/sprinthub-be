@@ -11,8 +11,8 @@ dùng **Redis 8 làm database chính duy nhất**. Dự án học tập/portfoli
 Backend dùng NestJS, TypeScript, node-redis, Redis Open Source 8 và Vitest.
 [Báo cáo spike lõi Redis](spikes/redis-core/REPORT.md). Giấy phép MIT.
 
-P0 đã có nền NestJS API/worker, auth session, Platform Admin CLI và workspace
-cùng membership. Spec hiện hành nằm trong [openspec/specs](openspec/specs/).
+P0 đã archive nền NestJS API/worker, auth session, Platform Admin CLI, workspace,
+membership và worker unassign. Spec hiện hành nằm trong [openspec/specs](openspec/specs/).
 
 ## Chạy backend local
 
@@ -101,7 +101,7 @@ khi đã ngừng ghi.
 
 API workspace yêu cầu session. Mutation gửi thêm `Idempotency-Key` và
 `X-Client-Mutation-Id` cùng header CSRF. Xem route, schema và mã lỗi trong
-[contract workspace](openspec/changes/workspaces-and-membership/contract.md).
+[contract workspace](openspec/changes/archive/2026-11-20-workspaces-and-membership/contract.md).
 Worker bootstrap group `unassign`, lưu job trước ACK và tiếp tục từ lịch job
 trong Redis khi khởi động lại. Worker xử lý mặc định 50 task mỗi batch. Đặt
 `UNASSIGN_BATCH_SIZE` từ 1 đến 100 để điều chỉnh. Theo dõi qua `docker compose logs worker`.
