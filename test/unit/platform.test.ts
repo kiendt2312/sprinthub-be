@@ -18,6 +18,18 @@ describe('runtime configuration', () => {
     expect(readConfig('worker', { REDIS_WORKER_URL: 'rediss://sh-worker:placeholder@localhost' }).role).toBe('worker');
   });
 
+  it('defaults worker unassign batches to 50 and accepts overrides from 1 to 100', () => {
+    const workerEnv = { REDIS_WORKER_URL: 'redis://sh-worker:placeholder@localhost' };
+    expect(readConfig('worker', workerEnv).unassignBatchSize).toBe(50);
+    for (const size of [1, 100]) {
+      expect(readConfig('worker', { ...workerEnv, UNASSIGN_BATCH_SIZE: String(size) }).unassignBatchSize).toBe(size);
+    }
+    for (const value of ['0', '101', '1.5', '']) {
+      expect(() => readConfig('worker', { ...workerEnv, UNASSIGN_BATCH_SIZE: value }))
+        .toThrow(expect.objectContaining({ variable: 'UNASSIGN_BATCH_SIZE' }));
+    }
+  });
+
   it.each([
     { REDIS_TIMEOUT_MS: '0' }, { API_PORT: '65536' }, { API_PORT: '1e3' },
     { REDIS_LIB_VERSION: '-1' }, { REDIS_LIB_VERSION: '999' },

@@ -136,7 +136,9 @@ function useFixtureScanPages(
 }
 
 it('resumes a multi-page job after a lost batch reply', async () => {
-  const f = await fixture(205);
+  const batchSize = workerStore.config.unassignBatchSize;
+  const oversizedPage = batchSize + 1;
+  const f = await fixture(2 * batchSize + 5);
   const { event, jobId, stream } = await removeMemberAndFindEvent(f);
   const { keys } = workerStore;
   const jobKey = keys.unassignJob(jobId);
@@ -157,29 +159,32 @@ it('resumes a multi-page job after a lost batch reply', async () => {
     }
     return reply;
   });
-  const firstScan = useFixtureScanPages(firstStore, index, () => ({ cursor: '1', members: f.taskIds.slice(0, 101) }));
+  const firstScan = useFixtureScanPages(firstStore, index, () => ({ cursor: '1', members: f.taskIds.slice(0, oversizedPage) }));
   let resumeScan: ReturnType<typeof useFixtureScanPages> | undefined;
   try {
     await leavePending(event.id, `batch-crash-${f.id}`);
     expect(await workerStore.call('sh_persist_unassign_job', [jobKey, keys.unassignJobsByDue()],
       [jobId, f.workspaceId, f.userId, event.message.eventId])).toMatchObject({ ok: true });
     expect(await workerStore.client.xAck(stream, 'unassign', event.id)).toBe(1);
+    // XCLAIM FORCE can leave the event eligible for a later XREADGROUP delivery.
+    // Check the ACK boundary before a worker can receive the event again.
+    expect(await maint.client.xPendingRange(stream, 'unassign', event.id, event.id, 1)).toHaveLength(0);
 
-    // Commit exactly one 100-task chunk before simulating loss of its reply.
+    // Commit exactly one batch before simulating loss of its reply.
     await firstRun.start();
     await vi.waitFor(() => expect(lostReply).toBe(true), { timeout: 7000 });
     await firstRun.stop();
     expect(await maint.client.get(fence)).toBe('1');
     expect(await maint.client.json.get(jobKey)).toMatchObject({ status: 'RUNNING', cursor: '0' });
     const remaining = await maint.client.sMembers(index);
-    expect(remaining).toHaveLength(105);
+    expect(remaining).toHaveLength(batchSize + 5);
 
-    // SSCAN COUNT is a hint. Redis can return 101 members with a nonzero cursor.
+    // SSCAN COUNT is a hint. Redis can return more than one batch with a nonzero cursor.
     // Replay that shape over the actual remaining tasks, independent of hash order.
     resumeScan = useFixtureScanPages(workerStore, index, (cursor) => {
-      if (cursor === '0') return { cursor: '1', members: remaining.slice(0, 101) };
+      if (cursor === '0') return { cursor: '1', members: remaining.slice(0, oversizedPage) };
       expect(cursor).toBe('1');
-      return { cursor: '0', members: remaining.slice(101) };
+      return { cursor: '0', members: remaining.slice(oversizedPage) };
     });
     await maint.client.pExpire(lock, 1);
     await vi.waitFor(async () => expect(await maint.client.exists(lock)).toBe(0));
@@ -195,7 +200,6 @@ it('resumes a multi-page job after a lost batch reply', async () => {
       return task.version;
     }));
     expect(new Set(versions)).toEqual(new Set([2]));
-    expect(await maint.client.xPendingRange(stream, 'unassign', event.id, event.id, 1)).toHaveLength(0);
   } finally {
     await firstRun.stop();
     await secondRun.stop();

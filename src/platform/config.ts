@@ -2,6 +2,8 @@ import { isIP } from 'node:net';
 
 export type ProcessRole = 'api' | 'worker' | 'maintenance';
 export const LIB_VERSION = 4;
+export const DEFAULT_UNASSIGN_BATCH_SIZE = 50;
+const MAX_UNASSIGN_BATCH_SIZE = 100;
 
 export class ConfigError extends Error {
   constructor(readonly variable: string) {
@@ -74,6 +76,9 @@ export function readConfig(role: ProcessRole, env = process.env) {
     port: role === 'api' ? positiveInteger(env, 'API_PORT', 3000, 65535) : 0,
     timeoutMs: positiveInteger(env, 'REDIS_TIMEOUT_MS', 200),
     shutdownMs: positiveInteger(env, 'SHUTDOWN_TIMEOUT_MS', 5000),
+    unassignBatchSize: role === 'worker'
+      ? positiveInteger(env, 'UNASSIGN_BATCH_SIZE', DEFAULT_UNASSIGN_BATCH_SIZE, MAX_UNASSIGN_BATCH_SIZE)
+      : DEFAULT_UNASSIGN_BATCH_SIZE,
     libVersion,
   };
 }

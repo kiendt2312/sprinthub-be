@@ -103,7 +103,8 @@ API workspace yêu cầu session. Mutation gửi thêm `Idempotency-Key` và
 `X-Client-Mutation-Id` cùng header CSRF. Xem route, schema và mã lỗi trong
 [contract workspace](openspec/changes/workspaces-and-membership/contract.md).
 Worker bootstrap group `unassign`, lưu job trước ACK và tiếp tục từ lịch job
-trong Redis khi khởi động lại. Theo dõi qua `docker compose logs worker`.
+trong Redis khi khởi động lại. Worker xử lý mặc định 50 task mỗi batch. Đặt
+`UNASSIGN_BATCH_SIZE` từ 1 đến 100 để điều chỉnh. Theo dõi qua `docker compose logs worker`.
 
 Dùng quyền maintenance để kiểm owner, slug và index membership khi đã ngừng ghi.
 
@@ -111,7 +112,7 @@ Dùng quyền maintenance để kiểm owner, slug và index membership khi đã
 node --env-file=.env dist/scripts/verify-workspace-indexes.js
 ```
 
-Lượt nghiệm thu trên Redis 8.10.3 đạt 24 unit test và 59 integration test,
+Lượt nghiệm thu workspace ban đầu trên Redis 8.10.3 đạt 24 unit test và 59 integration test,
 gồm tranh chấp slug/version/Owner, T-007/T-010, giao lại event, resume batch
 sau mất phản hồi, dedupe DLQ và retention. Smoke Compose xác nhận replay
 create, chuyển Owner, thu hồi quyền ngay và worker dọn assignee. Hai verifier

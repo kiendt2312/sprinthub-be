@@ -9,7 +9,6 @@ const GROUP = 'unassign';
 const BLOCK_MS = 1000;
 const CLAIM_IDLE_MS = 30_000;
 const MAX_DELIVERIES = 4;
-const PAGE_SIZE = 100;
 const DUE_BATCH_SIZE = 50;
 const TRIM_INTERVAL_MS = 60_000;
 const STREAM_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -55,6 +54,7 @@ function pendingDeliveryCount(store: RedisStore, stream: string, id: string) {
 
 export class UnassignWorker {
   readonly #blocking: WorkerClient;
+  readonly #batchSize: number;
   readonly #consumer = `${process.pid}-${randomUUID()}`;
   #stopped = false;
   #lastTrimAt = 0;
@@ -65,6 +65,7 @@ export class UnassignWorker {
 
   constructor(readonly store: RedisStore, config: RuntimeConfig, readonly options: UnassignWorkerOptions = {}) {
     this.#blocking = createRedisClient(config, 'blocking');
+    this.#batchSize = config.unassignBatchSize;
   }
 
   async start() {
@@ -221,11 +222,12 @@ export class UnassignWorker {
     const lease = claim.data as { epoch?: number; cursor?: string };
     if (!Number.isSafeInteger(lease.epoch) || typeof lease.cursor !== 'string') return;
 
+    const batchSize = this.#batchSize;
     let cursor = lease.cursor;
     for (let page = 0; page < 10_000 && !this.#stopped; page++) {
-      const scan = await this.store.read((redis) => redis.sScan(keys.userAssigned(userId), cursor, { COUNT: PAGE_SIZE }));
-      const chunks = Array.from({ length: Math.ceil(scan.members.length / PAGE_SIZE) }, (_, index) =>
-        scan.members.slice(index * PAGE_SIZE, (index + 1) * PAGE_SIZE));
+      const scan = await this.store.read((redis) => redis.sScan(keys.userAssigned(userId), cursor, { COUNT: batchSize }));
+      const chunks = Array.from({ length: Math.ceil(scan.members.length / batchSize) }, (_, index) =>
+        scan.members.slice(index * batchSize, (index + 1) * batchSize));
       if (!chunks.length) chunks.push([]);
       for (const [index, taskIds] of chunks.entries()) {
         if (this.#stopped) return;

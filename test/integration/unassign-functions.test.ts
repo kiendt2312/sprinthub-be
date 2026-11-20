@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, expect, it } from 'vitest';
+import { DEFAULT_UNASSIGN_BATCH_SIZE } from '../../src/platform/config.js';
 import { makeId } from '../../src/platform/http/request.js';
 import type { RedisStore } from '../../src/redis/client.js';
 import { createTask, removeMember } from '../../src/redis/functions.js';
@@ -188,10 +189,10 @@ it('preflights every task before writing any part of a batch', async () => {
   expect(await run(job, token, 1, [first.taskId, second.taskId])).toMatchObject({ ok: true, data: { done: true } });
 });
 
-it('processes a full batch within the 5 ms Redis Function budget', async () => {
+it('processes a default batch within the 5 ms Redis Function budget', async () => {
   const w = await workspace();
   const taskIds: string[] = [];
-  for (let i = 0; i < 100; i++) {
+  for (let i = 0; i < DEFAULT_UNASSIGN_BATCH_SIZE; i++) {
     const taskId = makeId('tsk');
     const reply = await createTask(app, {
       ...w, ...mutation(), taskId, assigneeId: w.userId,
@@ -214,12 +215,12 @@ it('processes a full batch within the 5 ms Redis Function budget', async () => {
       args[1] === 'sh_run_unassign_batch' && args[3] === keys.unassignJob(job.id))?.[2];
     expect(duration).toBeTypeOf('number');
     expect(duration).toBeLessThan(5000);
-    process.stdout.write(`P0 unassign SLOWLOG ${duration} µs at 100 tasks\n`);
+    process.stdout.write(`P0 unassign SLOWLOG ${duration} µs at ${DEFAULT_UNASSIGN_BATCH_SIZE} tasks\n`);
   } finally {
     await client.configSet(config);
   }
   expect(await client.sCard(keys.userAssigned(w.userId))).toBe(0);
-  expect(await client.get(keys.workspaceSeq(w.workspaceId))).toBe('201');
+  expect(await client.get(keys.workspaceSeq(w.workspaceId))).toBe(String(2 * DEFAULT_UNASSIGN_BATCH_SIZE + 1));
 });
 
 it('writes one dead-letter entry when the same source is retried concurrently', async () => {

@@ -77,9 +77,11 @@ Function persist dùng `JSON.SET job:{id} $ ... NX` và đăng lịch ZSET
 `unassign-jobs-by-due` trước ACK. Worker dùng `ZRANGE BYSCORE` có giới hạn
 để lấy job đến hạn sau bootstrap/reconnect, theo ACL cấm SCAN. Claim/batch
 cập nhật lịch theo lease và xóa lịch khi job terminal. Cảnh báo job kẹt
-quá 15 phút. Duyệt
-`user-assigned:{u}` bằng SSCAN, chia mỗi trang thành batch tối đa 100 task
-vì COUNT chỉ là gợi ý. [Redis SSCAN](https://redis.io/docs/latest/commands/sscan/).
+quá 15 phút. Duyệt `user-assigned:{u}` bằng SSCAN và chia mỗi trang theo
+`UNASSIGN_BATCH_SIZE` vì COUNT chỉ là gợi ý. Worker mặc định dùng 50 task và nhận
+giá trị cấu hình từ 1 đến 100. Function chặn batch vượt 100. Mặc định 50 giữ
+thêm biên cho ngân sách 5 ms sau khi batch 100 task vượt ngưỡng trong lượt
+integration lặp trên máy đang tải. [Redis SSCAN](https://redis.io/docs/latest/commands/sscan/).
 Cursor tiến sau khi xử lý cả trang. Khi chạy lại trang sau crash, Function
 kiểm assignee hiện tại trước khi ghi. Không đặt TTL job pending/running.
 Giữ job terminal và marker DLQ để một event pending lâu vẫn dedupe.
@@ -115,6 +117,7 @@ bootstrap. ACL cấp key/command cần theo role và cấm app/worker trim audit
 Mỗi request phân trang đọc trạng thái hiện hành. PEL giữ event pending.
 Marker dedupe và job terminal giữ lại qua thời gian trim để khôi phục.
 Verifier offline kiểm owner, slug, created, membership hai chiều và index trang.
-SLOWLOG ngưỡng 0 đo Function trên Redis 8.10.3 với batch tối đa. Redis không
-rollback lệnh đã chạy nên mọi chỉ mục, kiểu key và dữ liệu batch được kiểm
-trước khi bắt đầu ghi.
+SLOWLOG ngưỡng 0 đo Function trên Redis 8.10.3 với batch mặc định 50 task
+và ngân sách 5 ms. Bốn lượt integration trên cùng volume ghi nhận tối đa
+1,969 ms. Redis giữ các lệnh đã chạy khi Function gặp lỗi, nên Function
+kiểm chỉ mục, kiểu key và dữ liệu của cả batch trước khi ghi.
