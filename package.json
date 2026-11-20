@@ -12,6 +12,8 @@
     "start:api": "node --enable-source-maps dist/src/api/main.js",
     "start:worker": "node --enable-source-maps dist/src/worker/main.js",
     "redis:load": "node dist/scripts/load-library.js",
+    "admin": "node dist/scripts/admin/cli.js",
+    "verify:auth": "node dist/scripts/verify-auth.js",
     "openapi": "node dist/scripts/export-openapi.js",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
