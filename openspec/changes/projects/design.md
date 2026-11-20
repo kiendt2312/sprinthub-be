@@ -19,9 +19,11 @@ Triển khai vòng đời project, unique key, giữ project archived đọc đ�
 
 1. Đối chiếu KEYS. Load workspace và project thật nếu sửa, đối chiếu tên ID và tenant. Key cũ lệch snapshot trả `KEYS_MISMATCH` nội bộ.
 2. Kiểm membership, sau đó quyền OWNER/ADMIN. Actor ngoài tenant nhận 404, MEMBER nhận 403.
-3. Tra idempotency. Kiểm suspend/archive cho lệnh mới, trừ unarchive đối với archive. Unarchive khi đang active trả trạng thái hiện tại, lưu replay và giữ version/seq. Archive một project đã archived với key mới trả `PROJECT_ARCHIVED`.
-4. Kiểm expectedVersion, unique key, counter và kiểu của tất cả key sẽ ghi. Nguồn cũ phải trỏ về project khi đổi key. Cấp key và index cùng JSON, tăng seq/version, thêm `project:pid` vào workspace-changes, phát một event `PROJECT_CREATED`, `PROJECT_UPDATED`, `PROJECT_ARCHIVED` hoặc `PROJECT_UNARCHIVED`. Lưu replay cuối.
+3. Tra idempotency. Kiểm suspend/archive cho lệnh mới, trừ unarchive đối với archive. Archive một project đã archived với key mới trả `PROJECT_ARCHIVED`.
+4. Kiểm expectedVersion. Unarchive khi đang active và version khớp trả trạng thái hiện tại, lưu replay và giữ version/seq. Kiểm unique key, counter và kiểu của tất cả key sẽ ghi. Nguồn cũ phải trỏ về project khi đổi key. Cấp key và index cùng JSON, tăng seq/version, thêm `project:pid` vào workspace-changes, phát một event `PROJECT_CREATED`, `PROJECT_UPDATED`, `PROJECT_ARCHIVED` hoặc `PROJECT_UNARCHIVED`. Event project có projectId và duy nhất một cặp field entityVersion, clientMutationId. Lưu replay cuối.
 5. API chỉ đọc lại và thử tối đa hai lần sau reply `KEYS_MISMATCH` xác định chưa ghi. Timeout trả 503 cho client retry cùng key.
+
+Verifier offline kiểm hai chiều SET, ZSET score 0 và unique key, kể cả khi archived. Kiểm project trỏ đúng workspace đang tồn tại và active theo invariant 2. Fixture riêng gây lỗi chỉ mục để kiểm báo cáo. Workspace suspend chỉ chặn ghi mới và chưa thay đổi quyền đọc.
 
 ## Risks / Trade-offs
 

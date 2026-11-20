@@ -13,7 +13,7 @@ Prefix `/api/v1`. Session cookie, CSRF, header/request envelope, quota ghi 120/p
 | `POST /projects/{pid}/archive` | `{expectedVersion}` | `200 {data:Project,seq,requestId}` |
 | `POST /projects/{pid}/unarchive` | `{expectedVersion}` | `200 {data:Project,seq,requestId}` |
 
-Pagination tăng theo ID. `nextCursor=null` khi đã hết. `archived=true` bao gồm project active và archived. Mặc định và `archived=false` chỉ active. Key giữ chỗ trong workspace cả khi archive. Archive không làm thay đổi quyền đọc.
+Pagination tăng theo ID. `nextCursor=null` khi đã hết. `archived=true` bao gồm project active và archived. Mặc định và `archived=false` chỉ active. Key giữ chỗ trong workspace cả khi archive. Archive giữ quyền đọc. Unarchive khi project đã active chỉ thành công nếu expectedVersion vẫn khớp, trừ khi trả replay đã lưu.
 
 | Status | Code | Params |
 | --- | --- | --- |

@@ -1,8 +1,8 @@
 ## 1. Redis Function và tương thích
 
-- [ ] 1.1 Nâng v5, giữ chữ ký cũ, nối workspace/backlog vào create và workspace vào move (invariant 2, 3, 4, 5, 6, 8, 9, 10, 13, 17).
+- [ ] 1.1 Nâng LIB_VERSION 4 → 5, cập nhật readiness, giữ chữ ký cũ, nối workspace/backlog vào create và workspace vào move (invariant 2, 3, 4, 5, 6, 8, 9, 10, 13, 17).
 - [ ] 1.2 Viết update, assign và xóa mềm với snapshot key, replay, quyền, version, outbox và index (invariant 2, 3, 4, 5, 6, 7, 8, 9, 10, 13, 17).
-- [ ] 1.3 Chạy Redis thật cho T-004, race assign/remove, T-005, T-006, T-008, T-009, T-012, full cột, xóa mềm và spike suite/kịch bản (invariant 2–10, 13, 17).
+- [ ] 1.3 Chạy Redis thật cho T-004, race assign/remove, T-005, T-006, T-008, T-009, T-012, full cột, xóa mềm, 100 lần move/assign song song và spike suite/kịch bản cho chữ ký cũ (invariant 2–10, 13, 17).
 
 ## 2. HTTP task và board
 

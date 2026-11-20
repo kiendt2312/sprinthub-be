@@ -39,3 +39,11 @@ Danh sách SHALL dùng cursor gắn actor, workspace và bộ lọc archived. Th
 #### Scenario: Duyệt nhiều trang project
 - **WHEN** member đọc hết danh sách qua cursor của chính bộ lọc, với project active và archived
 - **THEN** mỗi project hợp lệ xuất hiện một lần theo ID. Dùng cursor cho bộ lọc, workspace hoặc actor khác nhận 400.
+
+### Requirement: Verifier vòng đời project
+
+Verifier offline SHALL so project JSON, workspace, SET, ZSET phân trang và unique key theo hai chiều. Project archived SHALL giữ các index và unique key.
+
+#### Scenario: Phát hiện index project lệch
+- **WHEN** verifier đọc fixture project hợp lệ và fixture có index thiếu, sai owner key hoặc index trỏ project không có JSON
+- **THEN** fixture lành sạch và fixture hỏng báo đúng mục lệch.

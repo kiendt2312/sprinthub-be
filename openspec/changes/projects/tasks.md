@@ -10,4 +10,5 @@
 
 ## 3. Nghiệm thu
 
-- [ ] 3.1 Chạy kịch bản archive → permalink → remove/unassign → unarchive trên Redis thật, xác minh replay, index và SLOWLOG (invariant 2, 3, 6, 8, 9, 13, 17).
+- [ ] 3.1 Bổ sung verifier project hai chiều cho tenant, unique key, workspace-projects và workspace-projects-page. Kiểm dữ liệu sạch và fixture index hỏng trên Redis thật (invariant 2, 9).
+- [ ] 3.2 Chạy kịch bản archive → permalink → remove/unassign → unarchive trên Redis thật, xác minh replay, index và SLOWLOG (invariant 2, 3, 6, 8, 9, 13, 17).
