@@ -5,9 +5,10 @@ Backlog, realtime) cho team 3–10 người, với **Redis 8 là database nghi�
 nhất**. Đây cũng là **repo trung tâm**: mọi session làm việc mở ở đây, kể cả khi
 sửa các repo khác.
 
-Trạng thái: spike lõi Redis đã xong (`openspec/changes/archive/2026-11-19-spike-redis-core`,
-kết quả ở `spikes/redis-core/REPORT.md`, spec `openspec/specs/redis-task-core`). Chưa có
-code ứng dụng; tiếp theo là các change P0.
+Trạng thái P0. Spike lõi Redis đã hoàn tất ([báo cáo](spikes/redis-core/REPORT.md)).
+Nền NestJS API/worker, auth session và Platform Admin CLI đã archive. Workspace,
+membership và worker unassign nằm trong change
+[workspaces-and-membership](openspec/changes/workspaces-and-membership/).
 
 ## Bản đồ repo
 
@@ -60,7 +61,7 @@ Deploy của `docs/design/design.md`.
 ## Công cụ
 
 Node 24 (`.nvmrc`), pnpm, TypeScript, NestJS, node-redis, Vitest, Playwright (ở
-`sprinthub-infra`). Chưa scaffold NestJS — làm sau spike.
+`sprinthub-infra`).
 
 ## Git
 

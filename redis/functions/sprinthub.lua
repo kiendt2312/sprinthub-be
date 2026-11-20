@@ -1,6 +1,6 @@
 #!lua name=sprinthub
 
-local LIB_VERSION = 3
+local LIB_VERSION = 4
 local IDEMPOTENCY_TTL = 86400
 local COLUMN_LIMIT = 500
 local STEP = 1024
@@ -156,6 +156,16 @@ local function prepare_outbox(keys, seq, event, change, data_json, request_hash,
         fields[#fields + 1] = event.projectId
         fields[#fields + 1] = 'taskId'
         fields[#fields + 1] = event.taskId
+    end
+    if event.entityVersion then
+        fields[#fields + 1] = 'entityVersion'
+        fields[#fields + 1] = integer(event.entityVersion)
+    end
+    if event.clientMutationId then
+        fields[#fields + 1] = 'clientMutationId'
+        fields[#fields + 1] = event.clientMutationId
+    end
+    if event.entityVersion and not event.taskId then
         fields[#fields + 1] = 'entityVersion'
         fields[#fields + 1] = integer(event.entityVersion)
         fields[#fields + 1] = 'clientMutationId'
@@ -1215,3 +1225,594 @@ redis.register_function('sh_set_platform_setting', function(keys, args)
     redis.call('XADD', keys[4], '*', unpack(audit))
     return admin_result(true)
 end)
+
+-- Workspace and membership mutations (library v4).
+local function ws_id(value)
+    return type(value) == 'string' and #value == 29
+        and value:match('^ws_[0-7][0-9A-HJKMNP-TV-Z]+$') ~= nil
+end
+
+local function ws_slug(value)
+    return type(value) == 'string' and #value >= 1 and #value <= 64
+        and value:match('^[a-z0-9][a-z0-9%-]*$') ~= nil
+        and not value:find('--', 1, true) and value:sub(1, 1) ~= '-' and value:sub(-1) ~= '-'
+end
+
+local function ws_name(value)
+    return type(value) == 'string' and #value > 0 and auth_code_points(value) <= 100
+end
+
+local function ws_mutation_args(args, first)
+    local idem, hash, now_ms, request_id, mutation_id = unpack(args, first, first + 4)
+    if type(idem) ~= 'string' or #idem < 1 or #idem > 128 or not idem:match('^[A-Za-z0-9._%-]+$')
+        or type(hash) ~= 'string' or #hash ~= 64 or not hash:match('^[0-9a-f]+$')
+        or type(request_id) ~= 'string' or request_id == ''
+        or type(mutation_id) ~= 'string' or mutation_id == '' then return nil end
+    local now = tonumber(now_ms)
+    if not auth_integer(now, 0, 253402300799999) then return nil end
+    return { idem = idem, hash = hash, now = now, request = request_id, mutation = mutation_id }
+end
+
+local function ws_public(workspace, actor_role)
+    local data = {
+        id = workspace.id, name = workspace.name, slug = workspace.slug,
+        ownerId = workspace.ownerId, role = actor_role, createdAt = workspace.createdAt,
+    }
+    return json_with_integers(data, { version = workspace.version, createdAtMs = workspace.createdAtMs })
+end
+
+local function ws_outbox(keys, workspace, actor, meta, event_type, payload, change, data_json)
+    -- Workspace mutations declare the same four trailing keys as task mutations.
+    local seq_key = keys[#keys - 3]
+    local seq = next_counter(seq_key)
+    local finish = prepare_outbox(keys, seq, {
+        workspaceId = workspace.id,
+        actorId = actor,
+        type = event_type,
+        occurredAt = iso_timestamp(meta.now),
+        requestId = meta.request,
+        entityVersion = workspace.version,
+        clientMutationId = meta.mutation,
+        payload = payload,
+    }, change, data_json, meta.hash, false)
+
+    return function()
+        redis.call('INCR', seq_key)
+        return finish()
+    end
+end
+
+local function ws_validate_document(workspace, ws)
+    assert(workspace and workspace.id == ws and ws_id(workspace.id)
+        and auth_id(workspace.ownerId) and ws_name(workspace.name) and ws_slug(workspace.slug)
+        and type(workspace.createdAt) == 'string' and auth_integer(workspace.createdAtMs, 0, MAX_SAFE_INTEGER)
+        and auth_integer(workspace.version, 1, MAX_SAFE_INTEGER), 'Invalid workspace document')
+end
+
+local function ws_preflight(keys, first, expected)
+    for offset, kind in ipairs(expected) do assert_type(keys[first + offset - 1], kind) end
+end
+
+local function ws_membership(keys, index, actor)
+    local role = redis.call('HGET', keys[index], actor)
+    if role ~= 'OWNER' and role ~= 'ADMIN' and role ~= 'MEMBER' then return nil end
+    return role
+end
+
+local function ws_load(keys, ws, actor)
+    local workspace = read_document(keys[2])
+    if not workspace or workspace.id ~= ws then return nil, reject('NOT_FOUND') end
+    local role = ws_membership(keys, 1, actor)
+    if not role then return nil, reject('NOT_FOUND') end
+    ws_validate_document(workspace, ws)
+    assert((role ~= 'OWNER' or actor == workspace.ownerId)
+        and redis.call('HGET', keys[1], workspace.ownerId) == 'OWNER',
+        'Workspace ownerId does not match the owner membership')
+    return { doc = workspace, role = role }
+end
+
+local function create_workspace(keys, args)
+    if #keys ~= 12 or #args ~= 9 then return reject('KEYS_MISMATCH') end
+    local ws, actor, name, slug = unpack(args, 1, 4)
+    local meta = ws_mutation_args(args, 5)
+    if not ws_id(ws) or not auth_id(actor) or not meta then return reject('KEYS_MISMATCH') end
+    local prefix = auth_prefix(keys[1], 'workspace-members:' .. ws)
+    local suffixes = { 'workspace-members:' .. ws, 'workspace:' .. ws,
+        'user-workspaces:' .. actor, 'user-workspaces-page:' .. actor,
+        'workspace-members-page:' .. ws, 'workspace-slug:' .. slug,
+        'workspaces-by-created', 'user:' .. actor, 'workspace-seq:' .. ws,
+        'workspace-changes:' .. ws, 'stream:domain-events', 'idempotency:' .. actor .. ':' .. meta.idem }
+    if not prefix or not ws_slug(slug) or not keys_match(keys, prefix, suffixes) then return reject('KEYS_MISMATCH') end
+    local user = read_document(keys[8])
+    if not user or user.id ~= actor or has_value(user.disabledAt) then return reject('NOT_FOUND') end
+    if not ws_name(name) or not ws_slug(slug) then return reject('VALIDATION_FAILED') end
+    local previous = replay(keys[12], meta.hash)
+    if previous then return previous end
+    if redis.call('EXISTS', keys[1]) == 1 or redis.call('EXISTS', keys[2]) == 1 then return reject('KEYS_MISMATCH') end
+    if redis.call('EXISTS', keys[6]) == 1 then return reject('WORKSPACE_SLUG_TAKEN') end
+    ws_preflight(keys, 1, { 'hash', 'ReJSON-RL', 'set', 'zset', 'zset', 'string', 'zset', 'ReJSON-RL', 'string', 'zset', 'stream' })
+    assert_type(keys[12], 'string')
+    local workspace = {
+        id = ws, name = name, slug = slug, ownerId = actor, schemaVersion = 1,
+        createdAt = iso_timestamp(meta.now), archivedAt = cjson.null,
+        suspendedAt = cjson.null, suspendedBy = cjson.null,
+    }
+    local raw = json_with_integers(workspace, { createdAtMs = meta.now, version = 1 })
+    workspace.createdAtMs, workspace.version = meta.now, 1
+    local finish = ws_outbox(keys, workspace, actor, meta, 'WORKSPACE_CREATED',
+        {}, 'workspace:' .. ws, ws_public(workspace, 'OWNER'))
+    redis.call('HSET', keys[1], actor, 'OWNER')
+    redis.call('JSON.SET', keys[2], '$', raw)
+    redis.call('SADD', keys[3], ws)
+    redis.call('ZADD', keys[4], 0, ws)
+    redis.call('ZADD', keys[5], 0, actor)
+    redis.call('SET', keys[6], ws)
+    redis.call('ZADD', keys[7], integer(meta.now), ws)
+    return finish()
+end
+
+local function update_workspace(keys, args)
+    if #keys ~= 8 or #args ~= 12 then return reject('KEYS_MISMATCH') end
+    local ws, actor, old_slug, new_slug, expected, name, slug = unpack(args, 1, 7)
+    local meta = ws_mutation_args(args, 8)
+    if not ws_id(ws) or not auth_id(actor) or not meta then return reject('KEYS_MISMATCH') end
+    if (slug ~= '' and new_slug ~= slug) or (slug == '' and new_slug ~= old_slug) then return reject('KEYS_MISMATCH') end
+    local prefix = auth_prefix(keys[1], 'workspace-members:' .. ws)
+    local suffixes = { 'workspace-members:' .. ws, 'workspace:' .. ws, 'workspace-slug:' .. old_slug,
+        'workspace-slug:' .. new_slug, 'workspace-seq:' .. ws, 'workspace-changes:' .. ws,
+        'stream:domain-events', 'idempotency:' .. actor .. ':' .. meta.idem }
+    if not prefix or not ws_slug(old_slug) or (new_slug ~= '' and not ws_slug(new_slug))
+        or not keys_match(keys, prefix, suffixes) then return reject('KEYS_MISMATCH') end
+    local loaded, failure = ws_load(keys, ws, actor)
+    if not loaded then return failure end
+    local workspace, role = loaded.doc, loaded.role
+    if workspace.slug ~= old_slug then return reject('KEYS_MISMATCH') end
+    if role ~= 'OWNER' and role ~= 'ADMIN' then return reject('FORBIDDEN') end
+    local previous = replay(keys[8], meta.hash)
+    if previous then return previous end
+    if has_value(workspace.suspendedAt) then return reject('WORKSPACE_SUSPENDED') end
+    if not expected:match('^[1-9]%d*$') or tonumber(expected) ~= workspace.version then
+        return reject('WORKSPACE_VERSION_CONFLICT', '{"currentVersion":' .. integer(workspace.version) .. '}')
+    end
+    local next_name = name ~= '' and name or workspace.name
+    local next_slug = slug ~= '' and slug or workspace.slug
+    if name ~= '' and not ws_name(name) or slug ~= '' and not ws_slug(slug) then return reject('VALIDATION_FAILED') end
+    if name == '' and slug == '' then return reject('VALIDATION_FAILED') end
+    if next_slug ~= workspace.slug and redis.call('EXISTS', keys[4]) == 1 then return reject('WORKSPACE_SLUG_TAKEN') end
+    assert(workspace.version < MAX_SAFE_INTEGER, 'Workspace version exceeds safe integer range')
+    ws_preflight(keys, 3, { 'string', 'string', 'string', 'zset', 'stream', 'string' })
+    if redis.call('GET', keys[3]) ~= ws then return reject('KEYS_MISMATCH') end
+    workspace.name, workspace.slug, workspace.version = next_name, next_slug, workspace.version + 1
+    local finish = ws_outbox(keys, workspace, actor, meta, 'WORKSPACE_UPDATED',
+        { name = next_name, slug = next_slug }, 'workspace:' .. ws, ws_public(workspace, role))
+    local name_json, slug_json = cjson.encode(next_name), cjson.encode(next_slug)
+    if next_slug ~= old_slug then
+        redis.call('DEL', keys[3])
+        redis.call('SET', keys[4], ws)
+    end
+    redis.call('JSON.MSET', keys[2], '$.name', name_json,
+        keys[2], '$.slug', slug_json, keys[2], '$.version', integer(workspace.version))
+    return finish()
+end
+
+local function add_workspace_member(keys, args)
+    if #keys ~= 11 or #args ~= 9 then return reject('KEYS_MISMATCH') end
+    local ws, actor, target, digest = unpack(args, 1, 4)
+    local meta = ws_mutation_args(args, 5)
+    if not ws_id(ws) or not auth_id(actor) or (target ~= '' and not auth_id(target)) or not meta then return reject('KEYS_MISMATCH') end
+    local index_user = target ~= '' and target or 'none'
+    local email_key = digest ~= '' and ('user-email:' .. digest) or 'user-email:none'
+    local prefix = auth_prefix(keys[1], 'workspace-members:' .. ws)
+    local suffixes = { 'workspace-members:' .. ws, 'workspace:' .. ws, 'user-workspaces:' .. index_user,
+        'user-workspaces-page:' .. index_user, 'workspace-members-page:' .. ws, 'user:' .. index_user,
+        email_key, 'workspace-seq:' .. ws, 'workspace-changes:' .. ws, 'stream:domain-events',
+        'idempotency:' .. actor .. ':' .. meta.idem }
+    if not prefix or (digest ~= '' and (#digest ~= 64 or not digest:match('^[0-9a-f]+$')))
+        or (target == '' and digest == '') or not keys_match(keys, prefix, suffixes) then return reject('KEYS_MISMATCH') end
+    local loaded, failure = ws_load(keys, ws, actor)
+    if not loaded then return failure end
+    local role = loaded.role
+    if role ~= 'OWNER' and role ~= 'ADMIN' then return reject('FORBIDDEN') end
+    local previous = replay(keys[11], meta.hash)
+    if previous then return previous end
+    if has_value(loaded.doc.suspendedAt) then return reject('WORKSPACE_SUSPENDED') end
+    if digest ~= '' then
+        local mapped = redis.call('GET', keys[7])
+        if not mapped then return reject('NOT_FOUND') end
+        if target == '' or mapped ~= target then return reject('KEYS_MISMATCH') end
+    end
+    if target == '' or target == actor then return reject('INVALID_MEMBER_TARGET') end
+    local user = read_document(keys[6])
+    if not user or user.id ~= target then return reject('NOT_FOUND') end
+    if redis.call('HGET', keys[1], target) then return reject('MEMBER_ALREADY_EXISTS') end
+    ws_preflight(keys, 3, { 'set', 'zset', 'zset', 'ReJSON-RL', 'string', 'string', 'zset', 'stream', 'string' })
+    local workspace = loaded.doc
+    assert(workspace.version < MAX_SAFE_INTEGER, 'Workspace version exceeds safe integer range')
+    workspace.version = workspace.version + 1
+    local data = { userId = target, role = 'MEMBER' }
+    local finish = ws_outbox(keys, workspace, actor, meta, 'MEMBER_ADDED',
+        data, 'member:' .. target, cjson.encode(data))
+    redis.call('HSET', keys[1], target, 'MEMBER')
+    redis.call('SADD', keys[3], ws)
+    redis.call('ZADD', keys[4], 0, ws)
+    redis.call('ZADD', keys[5], 0, target)
+    redis.call('JSON.SET', keys[2], '$.version', integer(workspace.version))
+    return finish()
+end
+
+local function update_workspace_role(keys, args)
+    if #keys ~= 6 or #args ~= 10 then return reject('KEYS_MISMATCH') end
+    local ws, actor, target, new_role, expected = unpack(args, 1, 5)
+    local meta = ws_mutation_args(args, 6)
+    local prefix = auth_prefix(keys[1], 'workspace-members:' .. ws)
+    local suffixes = { 'workspace-members:' .. ws, 'workspace:' .. ws, 'workspace-seq:' .. ws,
+        'workspace-changes:' .. ws, 'stream:domain-events', 'idempotency:' .. actor .. ':' .. (meta and meta.idem or '') }
+    if not prefix or not ws_id(ws) or not auth_id(actor) or not auth_id(target) or not meta
+        or not keys_match(keys, prefix, suffixes) then return reject('KEYS_MISMATCH') end
+    local loaded, failure = ws_load(keys, ws, actor)
+    if not loaded then return failure end
+    if loaded.role ~= 'OWNER' or loaded.doc.ownerId ~= actor then return reject('FORBIDDEN') end
+    local previous = replay(keys[6], meta.hash)
+    if previous then return previous end
+    if has_value(loaded.doc.suspendedAt) then return reject('WORKSPACE_SUSPENDED') end
+    if target == actor then return reject('WORKSPACE_OWNER_REQUIRED') end
+    local current = redis.call('HGET', keys[1], target)
+    if not current then return reject('NOT_FOUND') end
+    if current == 'OWNER' then return reject('WORKSPACE_OWNER_REQUIRED') end
+    if new_role ~= 'ADMIN' and new_role ~= 'MEMBER' then return reject('VALIDATION_FAILED') end
+    if not expected:match('^[1-9]%d*$') or tonumber(expected) ~= loaded.doc.version then
+        return reject('WORKSPACE_VERSION_CONFLICT', '{"currentVersion":' .. integer(loaded.doc.version) .. '}')
+    end
+    ws_preflight(keys, 1, { 'hash', 'ReJSON-RL', 'string', 'zset', 'stream', 'string' })
+    if current ~= 'ADMIN' and current ~= 'MEMBER' then return reject('NOT_FOUND') end
+    if current == new_role then
+        local raw_seq = redis.call('GET', keys[3]) or '0'
+        assert(raw_seq:match('^%d+$'), 'Invalid workspace sequence')
+        local current_seq = tonumber(raw_seq)
+        assert(current_seq <= MAX_SAFE_INTEGER, 'Workspace sequence exceeds safe integer range')
+        local response = '{"ok":true,"data":' .. cjson.encode({ userId = target, role = current })
+            .. ',"seq":' .. integer(current_seq) .. '}'
+        redis.call('SET', keys[6], cjson.encode({ requestHash = meta.hash, response = response }), 'EX', IDEMPOTENCY_TTL)
+        return response
+    end
+    assert(loaded.doc.version < MAX_SAFE_INTEGER, 'Workspace version exceeds safe integer range')
+    loaded.doc.version = loaded.doc.version + 1
+    local data = { userId = target, role = new_role }
+    local finish = ws_outbox(keys, loaded.doc, actor, meta, 'MEMBER_ROLE_UPDATED',
+        data, 'member:' .. target, cjson.encode(data))
+    redis.call('HSET', keys[1], target, new_role)
+    redis.call('JSON.SET', keys[2], '$.version', integer(loaded.doc.version))
+    return finish()
+end
+
+local function transfer_workspace_owner(keys, args)
+    if #keys ~= 6 or #args ~= 8 then return reject('KEYS_MISMATCH') end
+    local ws, actor, target = unpack(args, 1, 3)
+    local meta = ws_mutation_args(args, 4)
+    local prefix = auth_prefix(keys[1], 'workspace-members:' .. ws)
+    local suffixes = { 'workspace-members:' .. ws, 'workspace:' .. ws, 'workspace-seq:' .. ws,
+        'workspace-changes:' .. ws, 'stream:domain-events', 'idempotency:' .. actor .. ':' .. (meta and meta.idem or '') }
+    if not prefix or not ws_id(ws) or not auth_id(actor) or not auth_id(target) or not meta
+        or not keys_match(keys, prefix, suffixes) then return reject('KEYS_MISMATCH') end
+    local loaded, failure = ws_load(keys, ws, actor)
+    if not loaded then return failure end
+    local previous = replay(keys[6], meta.hash)
+    if previous then return previous end
+    if loaded.role ~= 'OWNER' or loaded.doc.ownerId ~= actor then return reject('FORBIDDEN') end
+    if has_value(loaded.doc.suspendedAt) then return reject('WORKSPACE_SUSPENDED') end
+    if target == actor then return reject('INVALID_MEMBER_TARGET') end
+    local target_role = redis.call('HGET', keys[1], target)
+    if not target_role then return reject('NOT_FOUND') end
+    if target_role ~= 'ADMIN' and target_role ~= 'MEMBER' then return reject('NOT_FOUND') end
+    ws_preflight(keys, 1, { 'hash', 'ReJSON-RL', 'string', 'zset', 'stream', 'string' })
+    assert(loaded.doc.version < MAX_SAFE_INTEGER, 'Workspace version exceeds safe integer range')
+    loaded.doc.ownerId = target
+    loaded.doc.version = loaded.doc.version + 1
+    local finish = ws_outbox(keys, loaded.doc, actor, meta, 'WORKSPACE_OWNER_TRANSFERRED',
+        { oldOwnerId = actor, ownerId = target }, 'workspace:' .. ws, ws_public(loaded.doc, 'ADMIN'))
+    local target_json = cjson.encode(target)
+    redis.call('HSET', keys[1], actor, 'ADMIN', target, 'OWNER')
+    redis.call('JSON.MSET', keys[2], '$.ownerId', target_json,
+        keys[2], '$.version', integer(loaded.doc.version))
+    return finish()
+end
+
+local function remove_workspace_member(keys, args)
+    if #keys ~= 10 or #args ~= 9 then return reject('KEYS_MISMATCH') end
+    local ws, actor, target, mode = unpack(args, 1, 4)
+    local meta = ws_mutation_args(args, 5)
+    local index_user = target ~= '' and target or 'none'
+    local prefix = auth_prefix(keys[1], 'workspace-members:' .. ws)
+    local suffixes = { 'workspace-members:' .. ws, 'workspace:' .. ws, 'user-workspaces:' .. index_user,
+        'user-workspaces-page:' .. index_user, 'workspace-members-page:' .. ws, 'stream:audit',
+        'workspace-seq:' .. ws, 'workspace-changes:' .. ws, 'stream:domain-events',
+        'idempotency:' .. actor .. ':' .. (meta and meta.idem or '') }
+    if not prefix or not ws_id(ws) or not auth_id(actor) or not auth_id(target) or not meta
+        or (mode ~= 'remove' and mode ~= 'leave') or not keys_match(keys, prefix, suffixes) then return reject('KEYS_MISMATCH') end
+    local loaded, failure = ws_load(keys, ws, actor)
+    if not loaded then return failure end
+    if mode == 'leave' and target ~= actor then return reject('INVALID_MEMBER_TARGET') end
+    if mode == 'remove' and target == actor then return reject('INVALID_MEMBER_TARGET') end
+    if mode == 'remove' and loaded.role ~= 'OWNER' and loaded.role ~= 'ADMIN' then return reject('FORBIDDEN') end
+    local previous = replay(keys[10], meta.hash)
+    if previous then return previous end
+    if has_value(loaded.doc.suspendedAt) then return reject('WORKSPACE_SUSPENDED') end
+    local target_role = redis.call('HGET', keys[1], target)
+    if not target_role then return reject('NOT_FOUND') end
+    if target_role ~= 'OWNER' and target_role ~= 'ADMIN' and target_role ~= 'MEMBER' then return reject('NOT_FOUND') end
+    if mode == 'remove' and loaded.role == 'ADMIN' and target_role ~= 'MEMBER' then return reject('FORBIDDEN') end
+    if target_role == 'OWNER' then return reject('WORKSPACE_OWNER_REQUIRED') end
+    ws_preflight(keys, 1, { 'hash', 'ReJSON-RL', 'set', 'zset', 'zset', 'stream', 'string', 'zset', 'stream', 'string' })
+    assert(loaded.doc.version < MAX_SAFE_INTEGER, 'Workspace version exceeds safe integer range')
+    loaded.doc.version = loaded.doc.version + 1
+    local data = { userId = target }
+    local finish = ws_outbox(keys, loaded.doc, actor, meta, 'MEMBER_REMOVED',
+        data, 'member:' .. target, cjson.encode(data))
+    local audit_type = mode == 'leave' and 'workspace.member.leave' or 'workspace.member.remove'
+    local occurred_at = iso_timestamp(meta.now)
+    redis.call('HDEL', keys[1], target)
+    redis.call('SREM', keys[3], ws)
+    redis.call('ZREM', keys[4], ws)
+    redis.call('ZREM', keys[5], target)
+    redis.call('JSON.SET', keys[2], '$.version', integer(loaded.doc.version))
+    redis.call('XADD', keys[6], '*', 'type', audit_type, 'workspaceId', ws,
+        'actorId', actor, 'targetId', target, 'requestId', meta.request,
+        'occurredAt', occurred_at)
+    return finish()
+end
+
+redis.register_function('sh_create_workspace', create_workspace)
+redis.register_function('sh_update_workspace', update_workspace)
+redis.register_function('sh_add_workspace_member', add_workspace_member)
+redis.register_function('sh_update_workspace_role', update_workspace_role)
+redis.register_function('sh_transfer_workspace_owner', transfer_workspace_owner)
+redis.register_function('sh_remove_workspace_member', remove_workspace_member)
+
+-- Durable member removal jobs
+do
+    local lease_ms = 30000
+    local batch_limit = 100
+    local queue_suffix = 'unassign-jobs-by-due'
+    local stream_suffix = 'stream:domain-events'
+    local function ok(data)
+        return '{"ok":true,"data":' .. data .. ',"seq":null}'
+    end
+
+    local function valid_component(value)
+        return #value <= 128 and value:match('^[A-Za-z0-9_-]+$') ~= nil
+    end
+
+    local function valid_cursor(value)
+        return #value <= 20 and value:match('^%d+$') ~= nil
+    end
+
+    local function job_prefix(keys, id, ws, user)
+        if not valid_component(id) or not valid_component(ws) or not valid_component(user) then
+            return nil
+        end
+        return auth_prefix(keys[1], 'job:' .. id)
+    end
+
+    local function job_scope(id, ws, user)
+        return { 'job:' .. id, queue_suffix, 'lock:unassign:' .. ws .. ':' .. user,
+            'fence:unassign:' .. ws .. ':' .. user }
+    end
+
+    local function validate_job(job, id, ws, user)
+        assert(job.id == id and job.workspaceId == ws and job.userId == user, 'Invalid unassign job identity')
+        assert(type(job.cursor) == 'string' and valid_cursor(job.cursor), 'Invalid unassign cursor')
+        assert(job.status == 'PENDING' or job.status == 'RUNNING' or job.status == 'DONE',
+            'Invalid unassign job status')
+    end
+
+    redis.register_function('sh_persist_unassign_job', function(keys, args)
+        if #keys ~= 2 or #args ~= 4 then return reject('KEYS_MISMATCH') end
+        local id, ws, user, event_id = unpack(args)
+        local prefix = job_prefix(keys, id, ws, user)
+        local event_workspace, seq = event_id:match('^([^:]+):([1-9]%d*)$')
+        if not prefix or ws ~= event_workspace or #seq > 16 or id ~= 'unassign-' .. ws .. '-' .. seq
+            or not keys_match(keys, prefix, { 'job:' .. id, queue_suffix }) then
+            return reject('KEYS_MISMATCH')
+        end
+
+        local existing = read_document(keys[1])
+        if existing then
+            validate_job(existing, id, ws, user)
+            assert(existing.eventId == event_id, 'Invalid unassign source ID')
+            return ok('false')
+        end
+        assert_type(keys[2], 'zset')
+        local now = auth_time_ms()
+        local document = cjson.encode({ id = id, workspaceId = ws, userId = user, eventId = event_id,
+            createdAtMs = now, cursor = '0', status = 'PENDING' })
+        if redis.call('JSON.SET', keys[1], '$', document, 'NX') then
+            redis.call('ZADD', keys[2], integer(now), id)
+            return ok('true')
+        end
+        return ok('false')
+    end)
+
+    redis.register_function('sh_claim_unassign_job', function(keys, args)
+        if #keys ~= 4 or #args ~= 4 then return reject('KEYS_MISMATCH') end
+        local id, ws, user, token = unpack(args)
+        local prefix = job_prefix(keys, id, ws, user)
+        if not prefix or not valid_component(token) or not keys_match(keys, prefix, job_scope(id, ws, user)) then
+            return reject('KEYS_MISMATCH')
+        end
+
+        local job = read_document(keys[1])
+        if not job then return ok('null') end
+        validate_job(job, id, ws, user)
+        if job.status == 'DONE' then return ok('null') end
+        assert_type(keys[2], 'zset')
+        assert_type(keys[3], 'string')
+        local now = auth_time_ms()
+        local ttl = redis.call('PTTL', keys[3])
+        assert(ttl ~= -1, 'Unassign lock must expire')
+        if ttl >= 0 then
+            redis.call('ZADD', keys[2], integer(now + math.max(ttl, 1)), id)
+            return ok('null')
+        end
+
+        local epoch = next_counter(keys[4])
+        local response = ok(json_with_integers({ cursor = job.cursor }, { epoch = epoch }))
+        redis.call('INCR', keys[4])
+        redis.call('SET', keys[3], id .. ':' .. token, 'PX', lease_ms)
+        redis.call('JSON.SET', keys[1], '$.status', '"RUNNING"')
+        redis.call('ZADD', keys[2], integer(now + lease_ms), id)
+        return response
+    end)
+
+    local task_paths = { '.id', '.workspaceId', '.projectId', '.assigneeId', '.deletedAt',
+        '.isDeleted', '.version' }
+    local optional_task_paths = { '$.id', '$.workspaceId', '$.projectId', '$.assigneeId', '$.deletedAt',
+        '$.isDeleted', '$.version' }
+
+    local function read_unassign_task(key)
+        -- Single-location paths return scalars without allocating one array per field.
+        local raw = redis.pcall('JSON.GET', key, unpack(task_paths))
+        if type(raw) ~= 'table' then return raw and cjson.decode(raw) end
+        if raw.err ~= 'ERR Path does not exist' then error(raw.err) end
+
+        -- Multi-path legacy reads reject an absent field, which older records may omit.
+        local values = cjson.decode(redis.call('JSON.GET', key, unpack(optional_task_paths)))
+        local task = {}
+        for i, path in ipairs(task_paths) do task[path] = values[optional_task_paths[i]][1] end
+        return task
+    end
+
+    local function plan_unassign(key, id, ws, user, seq, occurred_at, event_payload)
+        local task = read_unassign_task(key)
+        if not task or task['.id'] ~= id or task['.workspaceId'] ~= ws or task['.assigneeId'] ~= user
+            or has_value(task['.deletedAt']) or task['.isDeleted'] == 'true' then
+            return nil
+        end
+        local version = task['.version']
+        local project = task['.projectId']
+        assert(auth_integer(version, 1, MAX_SAFE_INTEGER - 1), 'Invalid task version')
+        assert(seq <= MAX_SAFE_INTEGER, 'Workspace seq exceeds safe integer range')
+        assert(type(project) == 'string' and is_id(project), 'Invalid task project')
+        local seq_arg = integer(seq)
+        local version_arg = integer(version + 1)
+        return {
+            id = id, seq = seq_arg, version = version_arg, key = key,
+            event = {
+                'eventId', ws .. ':' .. seq_arg, 'eventVersion', '1', 'type', 'TASK_UNASSIGNED',
+                'workspaceId', ws, 'projectId', project, 'taskId', id, 'actorId', 'worker:unassign',
+                'entityVersion', version_arg, 'seq', seq_arg, 'occurredAt', occurred_at,
+                'payload', event_payload,
+            },
+        }
+    end
+
+    redis.register_function('sh_run_unassign_batch', function(keys, args)
+        if #args < 7 or #args > 7 + batch_limit or #keys ~= #args + 2 then
+            return reject('KEYS_MISMATCH')
+        end
+        local id, ws, user, token, epoch, cursor, next_cursor = unpack(args, 1, 7)
+        local prefix = job_prefix(keys, id, ws, user)
+        if not prefix or not valid_component(token) or not epoch:match('^[1-9]%d*$')
+            or not valid_cursor(cursor) or (next_cursor ~= '' and not valid_cursor(next_cursor))
+            or (next_cursor == '' and #args == 7) then
+            return reject('KEYS_MISMATCH')
+        end
+        local suffixes = job_scope(id, ws, user)
+        suffixes[5], suffixes[6] = 'workspace-members:' .. ws, 'user-assigned:' .. user
+        suffixes[7], suffixes[8], suffixes[9] = 'workspace-seq:' .. ws, 'workspace-changes:' .. ws, stream_suffix
+        for i = 8, #args do
+            if not valid_component(args[i]) then return reject('KEYS_MISMATCH') end
+            suffixes[i + 2] = 'task:' .. args[i]
+        end
+        if not keys_match(keys, prefix, suffixes) then return reject('KEYS_MISMATCH') end
+
+        local job = read_document(keys[1])
+        if not job then return reject('STALE_JOB_EPOCH') end
+        validate_job(job, id, ws, user)
+        if job.status ~= 'RUNNING' or redis.call('GET', keys[3]) ~= id .. ':' .. token
+            or redis.call('GET', keys[4]) ~= epoch then
+            return reject('STALE_JOB_EPOCH')
+        end
+        if job.cursor ~= cursor then return reject('STALE_JOB_CURSOR') end
+
+        assert_type(keys[2], 'zset')
+        local now = auth_time_ms()
+        local rejoined = redis.call('HEXISTS', keys[5], user) == 1
+        local done = rejoined or next_cursor == '0'
+        local saved_cursor = rejoined and '0' or (next_cursor ~= '' and next_cursor or cursor)
+        local plans = {}
+        local first_seq
+        if not rejoined and #args > 7 then
+            assert_type(keys[6], 'set')
+            assert_type(keys[8], 'zset')
+            assert_type(keys[9], 'stream')
+            first_seq = next_counter(keys[7])
+            local occurred_at = iso_timestamp(now)
+            local event_payload = cjson.encode({ userId = user })
+            local seen = {}
+            for i = 8, #args do
+                local task_id = args[i]
+                if not seen[task_id] then
+                    seen[task_id] = true
+                    local plan = plan_unassign(keys[i + 2], task_id, ws, user, first_seq + #plans, occurred_at, event_payload)
+                    if plan then plans[#plans + 1] = plan end
+                end
+            end
+        end
+
+        local cursor_json = cjson.encode(saved_cursor)
+        local response = ok(cjson.encode({ cursor = saved_cursor, done = done }))
+        if #plans > 0 then
+            local updates, assigned, changes = {}, {}, {}
+            for _, plan in ipairs(plans) do
+                for _, arg in ipairs({
+                    plan.key, '.assigneeId', 'null',
+                    plan.key, '.assigneeIndexValue', '"UNASSIGNED"',
+                    plan.key, '.version', plan.version,
+                    plan.key, '.lastSeq', plan.seq,
+                }) do
+                    updates[#updates + 1] = arg
+                end
+                assigned[#assigned + 1] = plan.id
+                changes[#changes + 1] = plan.seq
+                changes[#changes + 1] = 'task:' .. plan.id
+            end
+
+            redis.call('JSON.MSET', unpack(updates))
+            redis.call('SET', keys[7], integer(first_seq + #plans - 1))
+            redis.call('SREM', keys[6], unpack(assigned))
+            redis.call('ZADD', keys[8], unpack(changes))
+            for _, plan in ipairs(plans) do
+                redis.call('XADD', keys[9], '*', unpack(plan.event))
+            end
+        end
+        redis.call('JSON.SET', keys[1], '$.cursor', cursor_json)
+        if done then
+            redis.call('JSON.SET', keys[1], '$.status', '"DONE"')
+            redis.call('ZREM', keys[2], id)
+            redis.call('DEL', keys[3])
+        else
+            redis.call('PEXPIRE', keys[3], lease_ms)
+            redis.call('ZADD', keys[2], integer(now + lease_ms), id)
+        end
+        return response
+    end)
+
+    redis.register_function('sh_dead_letter_unassign', function(keys, args)
+        if #keys ~= 3 or #args ~= 1 or not args[1]:match('^%d+%-%d+$') then
+            return reject('KEYS_MISMATCH')
+        end
+        local id = args[1]
+        local prefix = auth_prefix(keys[1], stream_suffix)
+        if not prefix or not keys_match(keys, prefix, { stream_suffix, 'stream:dead-letter', 'processed:dlq:' .. id }) then
+            return reject('KEYS_MISMATCH')
+        end
+        if redis.call('GET', keys[3]) then return ok('false') end
+        assert_type(keys[2], 'stream')
+        local entries = redis.call('XRANGE', keys[1], id, id, 'COUNT', 1)
+        if #entries == 0 then return ok('false') end
+        local event = cjson.encode(entries[1][2])
+        redis.call('XADD', keys[2], '*', 'sourceId', id, 'group', 'unassign', 'event', event)
+        redis.call('SET', keys[3], '1')
+        return ok('true')
+    end)
+end

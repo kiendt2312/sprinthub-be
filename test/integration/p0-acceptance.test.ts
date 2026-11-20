@@ -5,12 +5,12 @@ import { tmpdir, userInfo } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import type { NestExpressApplication } from '@nestjs/platform-express';
-import { expect, it, vi } from 'vitest';
+import { expect, it } from 'vitest';
 import { createApi } from '../../src/api/app.js';
-import { readConfig } from '../../src/platform/config.js';
+import { LIB_VERSION, readConfig } from '../../src/platform/config.js';
 import { makeId } from '../../src/platform/http/request.js';
 import { createKeys } from '../../src/redis/keys.js';
-import { connected, integrationStore } from '../support/redis.js';
+import { connected, integrationStore, waitForRedisData } from '../support/redis.js';
 
 const exec = promisify(execFile);
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
@@ -42,7 +42,7 @@ it('T-016 revokes old cookies on suspend racing login and keeps them invalid aft
     const me = (cookie: string) => fetch(url + '/users/me', { headers: { cookie } });
     const cookie = (response: Response) => response.headers.get('set-cookie')!.split(';')[0];
     const version = await runtime.client.fCallRo('sh_lib_version');
-    expect(version).toBe(3);
+    expect(version).toBe(LIB_VERSION);
 
     expect((await post('/auth/register', { email: operatorEmail, password, displayName: 'Operator' })).status).toBe(202);
     expect((await post('/auth/register', { email: targetEmail, password, displayName: 'Target' })).status).toBe(202);
@@ -135,13 +135,13 @@ it('T-016 revokes old cookies on suspend racing login and keeps them invalid aft
   }
 });
 
-it('keeps platform-admin and audit key families out of the sh-app ACL', async () => {
+it('blocks platform-admin changes and audit reads or trimming through runtime ACLs', async () => {
   const app = await connected(integrationStore('api'));
   const worker = await connected(integrationStore('worker'));
   const { keys } = app;
   const actor = makeId('usr');
   try {
-    expect(await app.client.fCallRo('sh_lib_version')).toBe(3);
+    expect(await app.client.fCallRo('sh_lib_version')).toBe(LIB_VERSION);
     for (const [name, signature] of [
       ['sh_grant_admin', [actor, actor, 'fixture', 'req_fixture', '[]']],
       ['sh_revoke_admin', [actor, actor, 'fixture', 'req_fixture', '[]', '[]']],
@@ -156,6 +156,10 @@ it('keeps platform-admin and audit key families out of the sh-app ACL', async ()
       await expect(app.client.fCall(name, { keys: declared, arguments: [...signature] })).rejects.toThrow(/NOPERM/);
     }
     await expect(app.client.hSet(keys.platformSettings(), 'registrationEnabled', '0')).rejects.toThrow(/NOPERM/);
+    for (const store of [app, worker]) {
+      await expect(store.client.sendCommand(['XRANGE', keys.audit(), '-', '+'])).rejects.toThrow(/NOPERM/);
+      await expect(store.client.sendCommand(['XTRIM', keys.audit(), 'MAXLEN', '0'])).rejects.toThrow(/NOPERM/);
+    }
     await expect(worker.client.hGetAll(keys.session('0'.repeat(64)))).rejects.toThrow(/NOPERM/);
   } finally {
     app.close();
@@ -247,12 +251,15 @@ it('keeps the 16-admin and 32-session workloads below 5 ms in Redis SLOWLOG and 
     expect(runId).toBeTruthy();
     expect(containerInfo.stdout).toContain(`run_id:${runId}`);
     await exec('docker', ['compose', 'restart', 'redis'], { timeout: 25_000 });
-    await vi.waitFor(() => expect(client.isReady).toBe(true), { timeout: 20_000 });
+    await waitForRedisData(redis);
     expect(await state()).toEqual(before);
   } finally {
-    const fixture: string[] = [];
-    for await (const batch of client.scanIterator({ MATCH: `${keys.prefix}*`, COUNT: 500 })) fixture.push(...batch);
-    if (fixture.length) await client.unlink(fixture);
-    redis.close();
+    try {
+      const fixture: string[] = [];
+      for await (const batch of client.scanIterator({ MATCH: `${keys.prefix}*`, COUNT: 500 })) fixture.push(...batch);
+      if (fixture.length) await client.unlink(fixture);
+    } finally {
+      redis.close();
+    }
   }
 }, 60_000);

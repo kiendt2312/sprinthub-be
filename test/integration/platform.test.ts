@@ -12,8 +12,9 @@ import { createApi } from '../../src/api/app.js';
 import { readConfig } from '../../src/platform/config.js';
 import { RedisStore } from '../../src/redis/client.js';
 import { createTask, moveTask, removeMember } from '../../src/redis/functions.js';
+import { createKeys } from '../../src/redis/keys.js';
 import { loadLibrary } from '../../scripts/load-library.js';
-import { connected, integrationStore, redisProxy } from '../support/redis.js';
+import { connected, integrationStore, redisProxy, waitForRedisData } from '../support/redis.js';
 
 const exec = promisify(execFile);
 
@@ -257,14 +258,15 @@ describe('platform on Redis', () => {
 describe('Compose lifecycle', () => {
   it('preserves task, outbox, index, idempotency and library across restart and regains readiness', async () => {
     const maint = await connected();
-    const runtime = await connected(integrationStore('api'));
     const app = await createApi(readConfig('api'));
     const worker = spawn(process.execPath, ['dist/src/worker/main.js'], { stdio: ['ignore', 'pipe', 'pipe'] });
     const workerExit = once(worker, 'exit');
     let workerOutput = '';
     worker.stdout.on('data', (buffer: Buffer) => { workerOutput += buffer.toString(); });
-    const { client, keys } = maint;
+    const { client } = maint;
     const id = randomUUID();
+    // The verifier scans its entire key prefix. Keep the persisted fixture in its own namespace.
+    const keys = createKeys(`${maint.keys.prefix}lifecycle:${id}:`);
     const workspaceId = 'ws_' + id;
     const projectId = 'prj_' + id;
     const actorId = 'usr_' + id;
@@ -275,7 +277,7 @@ describe('Compose lifecycle', () => {
       issue: await client.hGet(keys.workspaceTaskKeys(workspaceId), 'RE-1'),
       order: await client.zRangeWithScores(keys.board(projectId, 'TODO'), 0, -1),
       tasks: await client.sMembers(keys.projectTasks(projectId)),
-      events: (await client.xRange(keys.domainEvents(), '-', '+'))!.filter((entry) => entry.message.workspaceId === workspaceId),
+      events: await client.xRange(keys.domainEvents(), '-', '+'),
       idempotency: await client.get(keys.idempotency(actorId, key)),
       version: await client.fCallRo('sh_lib_version'),
     });
@@ -297,10 +299,10 @@ describe('Compose lifecycle', () => {
       await vi.waitFor(async () => expect((await fetch(base + '/health/ready')).status).toBe(200));
       await client.json.set(keys.project(projectId), '$', { id: projectId, key: 'RE', workspaceId, archivedAt: null });
       await client.hSet(keys.workspaceMembers(workspaceId), actorId, 'OWNER');
-      expect((await createTask(runtime, {
+      expect((await createTask(maint, {
         workspaceId, projectId, actorId, taskId, nowMs: Date.now(), idempotencyKey: key,
         clientMutationId: id, requestId: 'req_' + id, payload: { title: 'Restart' },
-      })).ok).toBe(true);
+      }, keys)).ok).toBe(true);
       const before = await state();
       await vi.waitFor(() => expect(workerOutput).toContain('"event":"worker_ready"'), { timeout: 4000 });
       workerOutput = '';
@@ -315,15 +317,13 @@ describe('Compose lifecycle', () => {
         await compose('up', '-d', '--wait', 'redis');
       }
       await vi.waitFor(async () => expect((await fetch(base + '/health/ready')).status).toBe(200), { timeout: 20_000 });
-      await vi.waitFor(() => expect(client.isReady).toBe(true));
+      await waitForRedisData(maint);
       expect(await state()).toEqual(before);
       await vi.waitFor(() => expect(workerOutput).toContain('"event":"worker_ready"'), { timeout: 4000 });
       const { verifyTaskIndexes } = await import('../../scripts/verify-task-indexes.js');
       expect(await verifyTaskIndexes(client, keys)).toEqual({ ok: true, findings: [] });
     } finally {
       await app.close();
-      runtime.close();
-      maint.close();
       worker.kill('SIGTERM');
       const deadline = setTimeout(() => worker.kill('SIGKILL'), 7000);
       try {
@@ -331,6 +331,16 @@ describe('Compose lifecycle', () => {
         expect(workerOutput).toContain('"event":"worker_shutdown"');
       } finally {
         clearTimeout(deadline);
+        try {
+          await client.unlink([
+            keys.project(projectId), keys.workspaceMembers(workspaceId), keys.task(taskId),
+            keys.workspaceTaskKeys(workspaceId), keys.board(projectId, 'TODO'), keys.projectTasks(projectId),
+            keys.projectTaskSeq(projectId), keys.domainEvents(), keys.workspaceSeq(workspaceId),
+            keys.workspaceChanges(workspaceId), keys.idempotency(actorId, key),
+          ]);
+        } finally {
+          maint.close();
+        }
       }
     }
   }, 45_000);

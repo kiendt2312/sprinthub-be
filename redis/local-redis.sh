@@ -17,13 +17,23 @@ for family in user:* user-email:* users-by-created user-sessions:* session:* rat
   auth_patterns="$auth_patterns ~$prefix$family"
 done
 auth_commands='+time +smembers +hgetall +hset +pexpireat +pttl +expire +del'
+workspace_patterns=''
+for family in workspace-slug:* workspaces-by-created user-workspaces-page:* workspace-members-page:*; do
+  workspace_patterns="$workspace_patterns ~$prefix$family"
+done
+worker_patterns=''
+for family in job:unassign-* unassign-jobs-by-due lock:unassign:* fence:unassign:* stream:dead-letter processed:dlq:*; do
+  worker_patterns="$worker_patterns ~$prefix$family"
+done
 settings="~${prefix}platform-settings"
+audit="~${prefix}stream:audit"
+domain="~${prefix}stream:domain-events"
 
 acl=$(mktemp)
 printf '%s\n' \
   'user default off' \
-  "user sh-app on #$(password_hash "$REDIS_APP_PASSWORD") $task_patterns $auth_patterns $task_commands $auth_commands (+fcall $task_patterns $auth_patterns $settings) (+type +hget $settings)" \
-  "user sh-worker on #$(password_hash "$REDIS_WORKER_PASSWORD") $task_patterns $task_commands" \
+  "user sh-app on #$(password_hash "$REDIS_APP_PASSWORD") $task_patterns $workspace_patterns $auth_patterns $task_commands $auth_commands +multi +exec (+fcall $task_patterns $auth_patterns $settings) (+type +hget $settings) (+fcall $task_patterns $workspace_patterns $audit) (+type +xadd $audit)" \
+  "user sh-worker on #$(password_hash "$REDIS_WORKER_PASSWORD") $task_patterns $worker_patterns $task_commands +time (+pexpire +pttl +del ~${prefix}lock:unassign:*) (+sscan ~${prefix}user-assigned:*) (+xgroup|create +xreadgroup +xack +xautoclaim +xpending +xtrim +xrange $domain)" \
   "user sh-maint on #$(password_hash "$REDIS_MAINT_PASSWORD") ~$prefix* &* +@all" > "$acl"
 chown redis:redis "$acl"
 exec /usr/local/bin/docker-entrypoint.sh redis-server /etc/sprinthub/redis.conf --aclfile "$acl"

@@ -1,6 +1,7 @@
 import { once } from 'node:events';
 import { createServer, connect } from 'node:net';
 import type { AddressInfo, Socket } from 'node:net';
+import { expect, vi } from 'vitest';
 import { readConfig } from '../../src/platform/config.js';
 import type { ProcessRole } from '../../src/platform/config.js';
 import { RedisStore } from '../../src/redis/client.js';
@@ -17,6 +18,14 @@ export async function connected(store = integrationStore()) {
     store.close();
     throw error;
   }
+}
+
+export async function waitForRedisData(store: RedisStore) {
+  await vi.waitFor(async () => {
+    // The client can reconnect while Redis is still restoring the dataset.
+    expect(await store.read((client) => client.ping())).toBe('PONG');
+    expect(await store.read((client) => client.info('persistence'))).toMatch(/^loading:0\r?$/m);
+  }, { timeout: 20_000 });
 }
 
 // Forward real Redis traffic while letting tests discard one specific command's reply.
