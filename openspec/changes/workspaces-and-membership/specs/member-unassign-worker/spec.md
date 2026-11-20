@@ -11,7 +11,7 @@ Dọn task của member đã rời workspace hoặc bị gỡ, có thể tiếp 
 Worker SHALL tạo group unassign khi bootstrap, ACK event không liên quan,
 và tạo job bằng JSON.SET NX theo eventId trước khi ACK MEMBER_REMOVED.
 Worker SHALL lấy lại pending qua XAUTOCLAIM và tìm lại job chưa hoàn tất
-sau restart.
+sau restart bằng lịch phục hồi bền, cùng Function với thao tác ghi job.
 
 #### Scenario: Crash trước persist và sau persist hoặc ACK
 - **WHEN** worker dừng trước JSON.SET, sau JSON.SET trước ACK, hoặc sau ACK trước batch
@@ -35,6 +35,10 @@ version, seq và sự kiện.
 #### Scenario: Restart ở giữa các batch
 - **WHEN** job có nhiều hơn 100 ứng viên và worker dừng sau một batch thành công
 - **THEN** job tiếp tục đến hết và không tăng version lần thứ hai cho task đã dọn
+
+#### Scenario: Tranh lease và lịch phục hồi
+- **WHEN** hai worker claim cùng job hoặc lease hết hạn sau crash
+- **THEN** chỉ một lease hợp lệ tại một thời điểm, job đến hạn xuất hiện lại và job đã xong rời lịch
 
 ### Requirement: DLQ có dedupe và trim giữ event cần xử lý
 

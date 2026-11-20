@@ -42,6 +42,10 @@ Tên slug cũ SHALL được giải phóng cùng mutation.
 - **WHEN** Member sửa setting hoặc Admin chọn slug đã thuộc workspace khác
 - **THEN** lần lượt trả 403 và 409, giữ nguyên các key nghiệp vụ
 
+#### Scenario: Mutation mới gặp workspace suspended
+- **WHEN** workspace đã suspend và actor có quyền gửi mutation mới hoặc replay thao tác thành công trước đó
+- **THEN** mutation mới nhận 423, còn replay giữ nguyên dữ liệu và seq đã lưu
+
 ### Requirement: Quản lý member và giữ đúng một Owner
 
 Function SHALL thêm user đã đăng ký theo ID/email với role MEMBER; chỉ Owner
@@ -50,7 +54,7 @@ transfer nguyên tử hoàn tất.
 
 #### Scenario: Thêm bằng ID hoặc email, gỡ member và replay
 - **WHEN** Admin thêm user đã đăng ký, gỡ MEMBER và retry cùng key
-- **THEN** membership và reverse index đồng bộ, có một event gỡ, và request kế tiếp của user đã gỡ nhận 404
+- **THEN** membership và reverse index đồng bộ, có một event gỡ và một entry audit, và request kế tiếp của user đã gỡ nhận 404
 
 #### Scenario: Đổi role và chuyển Owner đồng thời
 - **WHEN** Owner đổi role của member hoặc hai kết nối chuyển Owner sang hai member khác nhau
