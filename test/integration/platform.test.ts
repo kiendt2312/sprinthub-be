@@ -1,5 +1,6 @@
 import 'reflect-metadata';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
@@ -258,6 +259,10 @@ describe('Compose lifecycle', () => {
     const maint = await connected();
     const runtime = await connected(integrationStore('api'));
     const app = await createApi(readConfig('api'));
+    const worker = spawn(process.execPath, ['dist/src/worker/main.js'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const workerExit = once(worker, 'exit');
+    let workerOutput = '';
+    worker.stdout.on('data', (buffer: Buffer) => { workerOutput += buffer.toString(); });
     const { client, keys } = maint;
     const id = randomUUID();
     const workspaceId = 'ws_' + id;
@@ -297,24 +302,36 @@ describe('Compose lifecycle', () => {
         clientMutationId: id, requestId: 'req_' + id, payload: { title: 'Restart' },
       })).ok).toBe(true);
       const before = await state();
+      await vi.waitFor(() => expect(workerOutput).toContain('"event":"worker_ready"'), { timeout: 4000 });
+      workerOutput = '';
       expect(before.order).toEqual([{ value: taskId, score: 1024 }]);
       expect(before.events).toHaveLength(1);
       await compose('stop', 'redis');
       try {
         expect((await fetch(base + '/health/live')).status).toBe(200);
         expect((await fetch(base + '/health/ready')).status).toBe(503);
+        await vi.waitFor(() => expect(workerOutput).toContain('"event":"worker_not_ready"'), { timeout: 4000 });
       } finally {
         await compose('up', '-d', '--wait', 'redis');
       }
       await vi.waitFor(async () => expect((await fetch(base + '/health/ready')).status).toBe(200), { timeout: 20_000 });
       await vi.waitFor(() => expect(client.isReady).toBe(true));
       expect(await state()).toEqual(before);
+      await vi.waitFor(() => expect(workerOutput).toContain('"event":"worker_ready"'), { timeout: 4000 });
       const { verifyTaskIndexes } = await import('../../scripts/verify-task-indexes.js');
       expect(await verifyTaskIndexes(client, keys)).toEqual({ ok: true, findings: [] });
     } finally {
       await app.close();
       runtime.close();
       maint.close();
+      worker.kill('SIGTERM');
+      const deadline = setTimeout(() => worker.kill('SIGKILL'), 7000);
+      try {
+        expect(await workerExit).toEqual([0, null]);
+        expect(workerOutput).toContain('"event":"worker_shutdown"');
+      } finally {
+        clearTimeout(deadline);
+      }
     }
   }, 45_000);
 });

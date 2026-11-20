@@ -4,7 +4,11 @@ import { createKeys } from '../../src/redis/keys.js';
 import { decodeReply } from '../../src/redis/reply.js';
 import { makeId } from '../../src/platform/http/request.js';
 
-const apiEnv = { REDIS_APP_URL: 'redis://sh-app:placeholder@localhost' };
+const apiEnv = {
+  REDIS_APP_URL: 'redis://sh-app:placeholder@localhost',
+  AUTH_ORIGIN: 'http://localhost:3000',
+  AUTH_IP_HMAC_SECRET: 'a'.repeat(32),
+};
 
 describe('runtime configuration', () => {
   it('uses separate credentials for each process', () => {
@@ -16,7 +20,9 @@ describe('runtime configuration', () => {
 
   it.each([
     { REDIS_TIMEOUT_MS: '0' }, { API_PORT: '65536' }, { API_PORT: '1e3' },
-    { REDIS_LIB_VERSION: '-1' }, { REDIS_KEY_PREFIX: 'test:*' },
+    { REDIS_LIB_VERSION: '-1' }, { REDIS_LIB_VERSION: '999' },
+    { AUTH_ORIGIN: 'https://example.test/path' }, { AUTH_IP_HMAC_SECRET: 'short' },
+    { AUTH_TRUSTED_PROXIES: '0.0.0.0/0' }, { AUTH_SESSION_TOUCH_MS: '0' }, { REDIS_KEY_PREFIX: 'test:*' },
     { REDIS_APP_URL: 'redis://sh-app:placeholder@localhost/2' },
     { REDIS_APP_URL: 'http://sh-app:placeholder@localhost' },
   ])('rejects invalid environment %j', (override) => {
@@ -37,6 +43,9 @@ describe('Redis and request identifiers', () => {
     expect(decodeReply('{"ok":true,"data":{"version":1},"seq":2}')).toEqual({ ok: true, data: { version: 1 }, seq: 2 });
     expect(decodeReply('{"ok":false,"code":"CONFLICT","params":{"currentVersion":4}}')).toEqual({
       ok: false, code: 'CONFLICT', params: { currentVersion: 4 },
+    });
+    expect(decodeReply('{"ok":true,"data":{"changed":false},"seq":null}')).toEqual({
+      ok: true, data: { changed: false }, seq: null,
     });
     for (const value of [null, 'bad json', '{"ok":true,"seq":1}', '{"ok":true,"data":{},"seq":1.5}',
       '{"ok":false,"code":"ERROR","params":[]}']) expect(() => decodeReply(value)).toThrow();

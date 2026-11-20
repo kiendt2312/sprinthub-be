@@ -26,12 +26,14 @@ export async function redisProxy(redisUrl: string) {
   let match: string | undefined;
   let replacement: string | undefined;
   let count = 0;
+  let observe: ((data: Buffer) => void) | undefined;
   const server = createServer((client) => {
     const upstream = connect({ host: destination.hostname, port: Number(destination.port || '6379') });
     sockets.add(client);
     sockets.add(upstream);
     let replace = false;
     client.on('data', (data) => {
+      observe?.(data);
       if (match && data.includes(Buffer.from(match))) {
         count++;
         replace = true;
@@ -60,6 +62,7 @@ export async function redisProxy(redisUrl: string) {
     url: address.toString(),
     trap(command: string, reply?: string) { match = command; replacement = reply; },
     get count() { return count; },
+    observe(callback: (data: Buffer) => void) { observe = callback; },
     disconnect() { for (const socket of sockets) socket.destroy(); },
     async close() {
       this.disconnect();

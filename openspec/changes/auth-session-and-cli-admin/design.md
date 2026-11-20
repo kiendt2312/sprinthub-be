@@ -52,8 +52,8 @@ hệ thống nằm trong Redis SET và tách khỏi membership workspace (ADR-00
   chỉ thay cookie phía trình duyệt. Đổi quyền Platform Admin thu hồi các phiên
   của đích, người dùng đăng nhập lại nhận token mới.
 - `session:{digest}` là HASH chứa `userId`, ID công khai ngẫu nhiên `ses_<ULID>`,
-  `createdAtMs`, `lastSeenAtMs`, `expiresAtMs`, `absoluteExpiresAtMs`; TTL
-  tuyệt đối 30 ngày. Guard xác thực bằng một batch gồm `HGETALL session:{digest}`
+  `createdAtMs`, `lastSeenAtMs`, `expiresAtMs`, `absoluteExpiresAtMs`. Redis
+  đặt TTL tại hạn trượt, tối đa 30 ngày từ lúc tạo. Guard xác thực bằng một batch gồm `HGETALL session:{digest}`
   và `INCR` quota của route nếu đã biết key quota trước khi đọc phiên. Với
   fixed window, gửi `EXPIRE NX` cùng pipeline. Guard quyết định từ `userId`,
   `expiresAtMs` và `absoluteExpiresAtMs` trong HASH. Cần userId hợp lệ và cả
@@ -85,7 +85,9 @@ hệ thống nằm trong Redis SET và tách khỏi membership workspace (ADR-00
   sai định dạng, hết hạn hoặc đã thu hồi trả 204, xóa cookie và giữ nguyên
   các phiên khác. Timeout trả 503 và giữ cookie. Route bảo vệ đọc Redis lại
   ở request kế tiếp. Request đã qua guard có thể chạy tiếp. Function sửa hồ sơ
-  và thu hồi phiên tự phục vụ kiểm session lại trước khi ghi.
+  và thu hồi phiên tự phục vụ kiểm lại owner, index và cả hai hạn của cookie
+  trước khi ghi. Nếu cookie mất hiệu lực giữa lúc đọc snapshot và FCALL
+  logout-all, Function trả no-op và giữ các phiên khác.
 - CSRF chỉ áp cho mutation HTTP POST/PATCH/DELETE, kể cả login, register
   và logout. Mutation bắt buộc `X-CSRF-Protection: 1` và `Origin` khớp origin
   công khai đã cấu hình gồm scheme/host/port. Thiếu hoặc sai trả
@@ -108,7 +110,8 @@ hệ thống nằm trong Redis SET và tách khỏi membership workspace (ADR-00
   cho mọi lần thử hợp lệ về CSRF/DTO, kể cả login thành công, email không tồn
   tại và retry. Register 3/3.600 giây theo IP; PATCH hồ sơ 120/60 giây theo user.
   Không tiếp tục hash password hoặc sửa hồ sơ khi quota cạn. Từ lần vượt ngưỡng
-  trả 429; `Retry-After` là TTL lớn nhất trong các cửa sổ đang chặn.
+  trả 429; `Retry-After` là thời gian còn lại lớn nhất trong các cửa sổ đang
+  chặn, tính từ `PTTL` và làm tròn lên theo giây.
   IP canonical lấy từ peer trực tiếp hoặc proxy đã cấp trust rõ ràng; mặc định
   bỏ qua forwarded IP. Dùng HMAC-SHA256 cho IP với secret env riêng và không
   lưu IP thô trong limiter. `RateLimit` theo định dạng cố định trong contract.
