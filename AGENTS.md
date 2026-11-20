@@ -6,8 +6,8 @@ nhất**. Đây cũng là **repo trung tâm**: mọi session làm việc mở �
 sửa các repo khác.
 
 Trạng thái: spike lõi Redis đã xong (`openspec/changes/archive/2026-11-19-spike-redis-core`,
-kết quả ở `spikes/redis-core/REPORT.md`, spec `openspec/specs/redis-task-core`). Chưa có
-code ứng dụng; tiếp theo là các change P0.
+kết quả ở `spikes/redis-core/REPORT.md`, spec `openspec/specs/redis-task-core`). Nền NestJS API/worker, auth session và
+Platform Admin CLI đã hoàn tất. Change P0 tiếp theo bổ sung workspace và membership.
 
 ## Bản đồ repo
 
@@ -60,7 +60,7 @@ Deploy của `docs/design/design.md`.
 ## Công cụ
 
 Node 24 (`.nvmrc`), pnpm, TypeScript, NestJS, node-redis, Vitest, Playwright (ở
-`sprinthub-infra`). Chưa scaffold NestJS — làm sau spike.
+`sprinthub-infra`).
 
 ## Git
 

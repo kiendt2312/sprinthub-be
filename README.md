@@ -11,6 +11,9 @@ dùng **Redis 8 làm database chính duy nhất**. Dự án học tập/portfoli
 Backend dùng NestJS, TypeScript, node-redis, Redis Open Source 8 và Vitest.
 [Báo cáo spike lõi Redis](spikes/redis-core/REPORT.md). Giấy phép MIT.
 
+Nền NestJS API/worker, auth session và Platform Admin CLI đã hoàn tất. Spec
+hiện hành nằm trong [openspec/specs](openspec/specs/).
+
 ## Chạy backend local
 
 Cần Docker Compose, Node 24 và Corepack. Chọn Node theo `.nvmrc` trước khi khởi động.
