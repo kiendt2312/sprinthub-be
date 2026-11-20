@@ -1,7 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import type { OnModuleInit } from '@nestjs/common';
-import { isEmail } from 'class-validator';
 import { hash, verify } from '@node-rs/argon2';
 import type { Request, Response } from 'express';
 import { ApiError } from '../platform/http/errors.js';
@@ -12,7 +11,7 @@ import { log } from '../platform/log.js';
 import { AuthRepository } from './auth.repository.js';
 import { authResult, checkRate, publicProfile } from './auth.responses.js';
 import { USER_ID } from './auth.types.js';
-import { canonicalClientIp, clearCookie, cookieToken, emailDigest, ipDigest, normalizeEmail, setSessionCookie } from './auth.security.js';
+import { canonicalClientIp, clearCookie, cookieToken, emailDigest, ipDigest, setSessionCookie, validateEmail } from './auth.security.js';
 import type { LoginDto, RegisterDto } from './auth.dto.js';
 
 const ARGON_OPTIONS = {
@@ -42,7 +41,7 @@ export class AuthService implements OnModuleInit {
   }
 
   async register(dto: RegisterDto, request: Request) {
-    const { display, normalized } = this.#validateEmail(dto.email);
+    const { display, normalized } = validateEmail(dto.email);
     const displayName = dto.displayName.trim();
     checkRate(authResult(await this.repository.takeRate('register', this.#clientIpHash(request))));
     const passwordHash = await hash(dto.password, ARGON_OPTIONS);
@@ -54,7 +53,7 @@ export class AuthService implements OnModuleInit {
   }
 
   async login(dto: LoginDto, request: Request, response: Response) {
-    const { normalized } = this.#validateEmail(dto.email);
+    const { normalized } = validateEmail(dto.email);
     const emailSha = emailDigest(normalized);
     checkRate(authResult(await this.repository.takeRate('login', this.#clientIpHash(request), emailSha)));
     const uid = await this.repository.findUserId(emailSha);
@@ -109,15 +108,6 @@ export class AuthService implements OnModuleInit {
 
   #clientIpHash(request: Request) {
     return ipDigest(canonicalClientIp(request, this.config.trustedProxies), this.config.ipHmacSecret);
-  }
-
-  #validateEmail(input: string) {
-    const email = normalizeEmail(input);
-    if (!/^[\x21-\x7e]+$/.test(email.display) || email.display.length > 254
-      || !isEmail(email.display, { allow_utf8_local_part: false })) {
-      throw new ApiError(400, 'VALIDATION_FAILED');
-    }
-    return email;
   }
 
   #getDummyHash() {

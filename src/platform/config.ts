@@ -1,7 +1,7 @@
 import { isIP } from 'node:net';
 
 export type ProcessRole = 'api' | 'worker' | 'maintenance';
-export const LIB_VERSION = 3;
+export const LIB_VERSION = 4;
 
 export class ConfigError extends Error {
   constructor(readonly variable: string) {

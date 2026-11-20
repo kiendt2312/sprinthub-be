@@ -11,8 +11,8 @@ dùng **Redis 8 làm database chính duy nhất**. Dự án học tập/portfoli
 Backend dùng NestJS, TypeScript, node-redis, Redis Open Source 8 và Vitest.
 [Báo cáo spike lõi Redis](spikes/redis-core/REPORT.md). Giấy phép MIT.
 
-Nền NestJS API/worker, auth session và Platform Admin CLI đã hoàn tất. Spec
-hiện hành nằm trong [openspec/specs](openspec/specs/).
+P0 đã có nền NestJS API/worker, auth session, Platform Admin CLI và workspace
+cùng membership. Spec hiện hành nằm trong [openspec/specs](openspec/specs/).
 
 ## Chạy backend local
 
@@ -97,7 +97,28 @@ Trên VM chạy cùng entrypoint với cấu hình môi trường của operator
 Verifier đọc hai chiều user, index email/created, phiên và Platform Admin
 khi đã ngừng ghi.
 
-## Nghiệm thu P0 foundation và auth
+## Workspace và membership P0
+
+API workspace yêu cầu session. Mutation gửi thêm `Idempotency-Key` và
+`X-Client-Mutation-Id` cùng header CSRF. Xem route, schema và mã lỗi trong
+[contract workspace](openspec/changes/workspaces-and-membership/contract.md).
+Worker bootstrap group `unassign`, lưu job trước ACK và tiếp tục từ lịch job
+trong Redis khi khởi động lại. Theo dõi qua `docker compose logs worker`.
+
+Dùng quyền maintenance để kiểm owner, slug và index membership khi đã ngừng ghi.
+
+```sh
+node --env-file=.env dist/scripts/verify-workspace-indexes.js
+```
+
+Lượt nghiệm thu trên Redis 8.10.3 đạt 24 unit test và 59 integration test,
+gồm tranh chấp slug/version/Owner, T-007/T-010, giao lại event, resume batch
+sau mất phản hồi, dedupe DLQ và retention. Smoke Compose xác nhận replay
+create, chuyển Owner, thu hồi quyền ngay và worker dọn assignee. Hai verifier
+workspace/task báo sạch. SLOWLOG ghi tối đa 0,362 ms cho sáu Function workspace
+trong smoke và 2,889 ms cho batch 100 task.
+
+## Nghiệm thu P0 foundation và auth (library v3)
 
 Redis 8.10.3 theo digest trong Compose, AOF `appendfsync always` và
 `noeviction`. Lượt nghiệm thu dùng volume riêng và Node 24.22.2.

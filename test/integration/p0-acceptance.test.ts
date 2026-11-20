@@ -7,7 +7,7 @@ import { promisify } from 'node:util';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { expect, it, vi } from 'vitest';
 import { createApi } from '../../src/api/app.js';
-import { readConfig } from '../../src/platform/config.js';
+import { LIB_VERSION, readConfig } from '../../src/platform/config.js';
 import { makeId } from '../../src/platform/http/request.js';
 import { createKeys } from '../../src/redis/keys.js';
 import { connected, integrationStore } from '../support/redis.js';
@@ -42,7 +42,7 @@ it('T-016 revokes old cookies on suspend racing login and keeps them invalid aft
     const me = (cookie: string) => fetch(url + '/users/me', { headers: { cookie } });
     const cookie = (response: Response) => response.headers.get('set-cookie')!.split(';')[0];
     const version = await runtime.client.fCallRo('sh_lib_version');
-    expect(version).toBe(3);
+    expect(version).toBe(LIB_VERSION);
 
     expect((await post('/auth/register', { email: operatorEmail, password, displayName: 'Operator' })).status).toBe(202);
     expect((await post('/auth/register', { email: targetEmail, password, displayName: 'Target' })).status).toBe(202);
@@ -135,13 +135,13 @@ it('T-016 revokes old cookies on suspend racing login and keeps them invalid aft
   }
 });
 
-it('keeps platform-admin and audit key families out of the sh-app ACL', async () => {
+it('blocks platform-admin changes and audit reads or trimming through runtime ACLs', async () => {
   const app = await connected(integrationStore('api'));
   const worker = await connected(integrationStore('worker'));
   const { keys } = app;
   const actor = makeId('usr');
   try {
-    expect(await app.client.fCallRo('sh_lib_version')).toBe(3);
+    expect(await app.client.fCallRo('sh_lib_version')).toBe(LIB_VERSION);
     for (const [name, signature] of [
       ['sh_grant_admin', [actor, actor, 'fixture', 'req_fixture', '[]']],
       ['sh_revoke_admin', [actor, actor, 'fixture', 'req_fixture', '[]', '[]']],
@@ -156,6 +156,10 @@ it('keeps platform-admin and audit key families out of the sh-app ACL', async ()
       await expect(app.client.fCall(name, { keys: declared, arguments: [...signature] })).rejects.toThrow(/NOPERM/);
     }
     await expect(app.client.hSet(keys.platformSettings(), 'registrationEnabled', '0')).rejects.toThrow(/NOPERM/);
+    for (const store of [app, worker]) {
+      await expect(store.client.sendCommand(['XRANGE', keys.audit(), '-', '+'])).rejects.toThrow(/NOPERM/);
+      await expect(store.client.sendCommand(['XTRIM', keys.audit(), 'MAXLEN', '0'])).rejects.toThrow(/NOPERM/);
+    }
     await expect(worker.client.hGetAll(keys.session('0'.repeat(64)))).rejects.toThrow(/NOPERM/);
   } finally {
     app.close();

@@ -14,15 +14,16 @@ Chỉ hai route danh sách nhận query.
 - `Workspace` có `id`, `name`, `slug`, `ownerId`, `role` của actor,
   `version`, `createdAt` (ISO UTC), `createdAtMs` (epoch ms).
 - `Member` có `userId` và `role`. Role là `OWNER | ADMIN | MEMBER`.
-- `wid` là `ws_<ULID>`; `uid`/ `userId` là `usr_<ULID>`. `name` dài
+- `wid` dùng định dạng `ws_<ULID>`. `uid` và `userId` dùng `usr_<ULID>`. `name` dài
   1–100 Unicode code point sau trim. `slug` dài 1–64 ASCII, mẫu
   `[a-z0-9]+(?:-[a-z0-9]+)*` (khớp toàn chuỗi). Email dùng cùng quy tắc
   validate và chuẩn hóa như auth.
 - `expectedVersion` là số nguyên an toàn dương từ Workspace gần nhất
   hoặc `workspaceVersion` của trang thành viên. Các thay đổi membership
-  tăng version workspace để cả hai PATCH cùng phát hiện xung đột.
+  tăng version workspace để cả hai PATCH cùng phát hiện xung đột. Đặt lại
+  role hiện tại trả role và seq đang có, đồng thời lưu replay.
 - Danh sách dùng `limit` 1–100, mặc định 50, và `cursor` opaque tùy chọn.
-  Thứ tự ID tăng dần; `nextCursor` null khi đã hết. Cursor ràng buộc
+  Thứ tự ID tăng dần. `nextCursor` null khi đã hết. Cursor ràng buộc
   với loại danh sách và actor (cùng workspace nếu có).
 
 ## Routes
@@ -44,7 +45,8 @@ Member có quyền đọc, Admin có quyền sửa workspace và thêm/xóa MEMB
 Owner được xóa ADMIN, đổi role và chuyển Owner. Actor muốn tự gỡ dùng
 `/leave`. Owner phải chuyển quyền trước. Response phép đọc kiểm quyền
 mới tại Redis. Replay giữ `data` và `seq` cũ, còn `requestId` là của
-request hiện tại. Sau transfer, Owner cũ vẫn còn là thành viên và có thể
+request hiện tại. POST tạo workspace xác thực account còn active. Các
+route có workspace đích kiểm lại membership và quyền hiện hành. Sau transfer, Owner cũ vẫn còn là thành viên và có thể
 replay đúng thao tác transfer đã thành công. Sau leave, request mới
 nhận 404 theo quy tắc tenant. Retry 503 dùng lại cả hai header mutation.
 Hash bao gồm thao tác, đích và payload chuẩn hóa, kể cả mutation ID.

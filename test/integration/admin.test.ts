@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
 import { ulid } from 'ulid';
-import { readConfig } from '../../src/platform/config.js';
+import { LIB_VERSION, readConfig } from '../../src/platform/config.js';
 import { RedisStore } from '../../src/redis/client.js';
 import { integrationStore } from '../support/redis.js';
 import { verifyAuth } from '../../scripts/verify-auth.js';
@@ -12,7 +12,7 @@ const testConfig = readConfig('maintenance', {
   ...process.env,
   REDIS_MAINT_URL: base.config.redisUrl,
   REDIS_KEY_PREFIX: prefix,
-  REDIS_LIB_VERSION: '3',
+  REDIS_LIB_VERSION: String(LIB_VERSION),
 });
 const actor = `usr_${ulid()}`;
 const target = `usr_${ulid()}`;
@@ -178,7 +178,7 @@ describe('Platform Admin Redis Functions', () => {
   it('serializes reciprocal admin revokes and self-suspends on separate connections', async () => {
     const racePrefix = `${base.keys.prefix}race_${ulid()}:`;
     const raceConfig = readConfig('maintenance', {
-      ...process.env, REDIS_MAINT_URL: base.config.redisUrl, REDIS_KEY_PREFIX: racePrefix, REDIS_LIB_VERSION: '3',
+      ...process.env, REDIS_MAINT_URL: base.config.redisUrl, REDIS_KEY_PREFIX: racePrefix, REDIS_LIB_VERSION: String(LIB_VERSION),
     });
     const raceStore = new RedisStore(raceConfig, 'maintenance');
     const raceKeys = raceStore.keys;

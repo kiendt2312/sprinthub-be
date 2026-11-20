@@ -13,6 +13,7 @@ import { nestLogger } from '../platform/log.js';
 import { RedisModule } from '../redis/redis.module.js';
 import { AuthModule } from '../auth/auth.module.js';
 import { UsersModule } from '../users/users.module.js';
+import { WorkspacesModule } from '../workspaces/workspaces.module.js';
 import { HealthController } from './health.controller.js';
 
 @Module({})
@@ -21,7 +22,7 @@ class ApiModule {}
 export async function createApi(config: RuntimeConfig, extraImports: DynamicModule[] = []) {
   const app = await NestFactory.create<NestExpressApplication>({
     module: ApiModule,
-    imports: [RedisModule.configure(config), AuthModule, UsersModule, ...extraImports],
+    imports: [RedisModule.configure(config), AuthModule, UsersModule, WorkspacesModule, ...extraImports],
     controllers: [HealthController],
   }, { logger: nestLogger, abortOnError: false, bodyParser: false, forceCloseConnections: false });
 

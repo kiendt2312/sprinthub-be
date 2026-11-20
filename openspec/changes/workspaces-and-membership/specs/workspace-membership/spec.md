@@ -48,7 +48,7 @@ Tên slug cũ SHALL được giải phóng cùng mutation.
 
 ### Requirement: Quản lý member và giữ đúng một Owner
 
-Function SHALL thêm user đã đăng ký theo ID/email với role MEMBER; chỉ Owner
+Function SHALL thêm user đã đăng ký theo ID/email với role MEMBER. Chỉ Owner
 được đổi role, chuyển Owner hoặc gỡ Admin. Owner SHALL được giữ cho tới khi
 transfer nguyên tử hoàn tất.
 
@@ -67,7 +67,8 @@ transfer nguyên tử hoàn tất.
 ### Requirement: Tuân thủ bảo vệ và envelope HTTP
 
 Mutation workspace SHALL kiểm CSRF, quota, header, DTO allow-list và trả
-mã lỗi dịch được. Replay SHALL yêu cầu quyền tenant hiện hành.
+mã lỗi dịch được. Replay trên route có workspace đích SHALL yêu cầu
+quyền tenant hiện hành.
 
 #### Scenario: Request không hợp lệ và replay sau revoke
 - **WHEN** request thiếu header, sai DTO, vượt quota hoặc actor ngoài tenant replay mutation cũ

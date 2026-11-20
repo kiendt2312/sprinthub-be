@@ -1,5 +1,6 @@
 import { createHash, createHmac } from 'node:crypto';
 import { isIP } from 'node:net';
+import { isEmail } from 'class-validator';
 import type { Request } from 'express';
 import { ApiError } from '../platform/http/errors.js';
 
@@ -9,6 +10,15 @@ export const SESSION_ABSOLUTE_SECONDS = 30 * 24 * 60 * 60;
 export function normalizeEmail(value: string) {
   const display = value.trim();
   return { display, normalized: display.toLowerCase() };
+}
+
+export function validateEmail(value: string) {
+  const email = normalizeEmail(value);
+  if (!/^[\x21-\x7e]+$/.test(email.display) || email.display.length > 254
+    || !isEmail(email.display, { allow_utf8_local_part: false })) {
+    throw new ApiError(400, 'VALIDATION_FAILED');
+  }
+  return email;
 }
 
 export function emailDigest(normalized: string) {

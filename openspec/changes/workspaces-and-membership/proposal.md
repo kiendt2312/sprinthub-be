@@ -7,7 +7,7 @@ project/task. Gỡ membership còn cần một đường xử lý bền để d�
 
 ## What Changes
 
-- Tạo, xem, liệt kê và sửa workspace; quản lý thành viên có tài khoản, đổi role,
+- Tạo, xem, liệt kê và sửa workspace, quản lý thành viên có tài khoản, đổi role,
   chuyển Owner và rời workspace.
 - Thu hồi quyền ngay khi gỡ member. Worker lưu job trước ACK, tiếp tục khi
   khởi động lại và dọn assignee theo batch có fencing.

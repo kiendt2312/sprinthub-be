@@ -5,6 +5,7 @@ import { readConfig } from '../platform/config.js';
 import { log, nestLogger, startupFailed } from '../platform/log.js';
 import { RedisStore } from '../redis/client.js';
 import { RedisModule } from '../redis/redis.module.js';
+import { UnassignWorker } from './unassign-worker.js';
 
 async function main() {
   const config = readConfig('worker');
@@ -14,6 +15,8 @@ async function main() {
 
   const app = await NestFactory.createApplicationContext(WorkerModule, { logger: nestLogger, abortOnError: false });
   const redis = app.get(RedisStore);
+  const worker = new UnassignWorker(redis, config);
+  await worker.start();
   let previous: boolean | undefined;
   const probe = async () => {
     const ready = await redis.ready();
@@ -26,6 +29,7 @@ async function main() {
   const shutdown = async () => {
     clearInterval(interval);
     const timeout = setTimeout(() => process.exit(1), config.shutdownMs).unref();
+    await worker.stop();
     await app.close();
     clearTimeout(timeout);
     log('info', 'worker_shutdown');
