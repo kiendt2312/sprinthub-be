@@ -9,11 +9,13 @@ stage=$(mktemp -d)
 export COMPOSE_PROJECT_NAME=sprinthub-spike-check-$$
 cleanup() {
   docker compose --project-directory "$stage" down --volumes
-  rm -rf -- "$stage"
+  find "$stage" -depth -delete
 }
 trap cleanup EXIT
 git -C "$root" archive HEAD spikes/redis-core | tar -x --strip-components=2 -C "$stage"
 cp "$root/redis/functions/sprinthub.lua" "$stage/functions/sprinthub.lua"
+sed -i 's#\./data:/data#redis-data:/data#' "$stage/compose.yaml"
+printf '\nvolumes:\n  redis-data:\n' >> "$stage/compose.yaml"
 sed -i "s/sh_lib_version\")).toBe(1)/sh_lib_version\")).toBe($version)/" "$stage/test/integration/core.test.ts"
 cd "$stage"
 corepack pnpm install --frozen-lockfile
