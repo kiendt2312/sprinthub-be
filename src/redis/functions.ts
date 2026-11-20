@@ -66,7 +66,7 @@ export async function createTask(client: Client, input: CreateTaskInput, keys = 
     ...payload, assigneeId, clientMutationId,
   });
 
-  return client.call("sh_create_task", [
+  return client.callWorkspace("sh_create_task", [
       keys.workspaceMembers(workspaceId), keys.project(projectId), keys.projectTaskSeq(projectId),
       keys.workspaceTaskKeys(workspaceId), keys.task(taskId), keys.projectTasks(projectId),
       keys.board(projectId, "TODO"), keys.userAssigned(assigneeId), ...mutationKeys(keys, input),
@@ -89,7 +89,7 @@ export async function moveTask(client: Client, input: MoveTaskInput, keys = clie
     to, afterTaskId, beforeTaskId, expectedVersion, clientMutationId,
   });
 
-  return client.call("sh_move_task", [
+  return client.callWorkspace("sh_move_task", [
       keys.workspaceMembers(workspaceId), keys.project(projectId), keys.task(taskId),
       keys.board(projectId, from), keys.board(projectId, to), ...mutationKeys(keys, input),
     ],
@@ -103,7 +103,7 @@ export async function moveTask(client: Client, input: MoveTaskInput, keys = clie
 export async function removeMember(client: Client, input: RemoveMemberInput, keys = client.keys) {
   const { workspaceId, actorId, userId, idempotencyKey, nowMs } = input;
   const hash = requestHash("sh_remove_member", [workspaceId, userId], {});
-  return client.call("sh_remove_member", [keys.workspaceMembers(workspaceId), keys.userWorkspaces(userId), ...mutationKeys(keys, input)],
+  return client.callWorkspace("sh_remove_member", [keys.workspaceMembers(workspaceId), keys.userWorkspaces(userId), ...mutationKeys(keys, input)],
     [workspaceId, actorId, userId, idempotencyKey, hash, String(nowMs), input.requestId],
   );
 }

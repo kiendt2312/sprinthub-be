@@ -1,5 +1,5 @@
 export type FunctionReply =
-  | { ok: true; data: unknown; seq: number }
+  | { ok: true; data: unknown; seq: number | null }
   | { ok: false; code: string; params: Record<string, unknown> };
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -21,7 +21,7 @@ export function decodeReply(raw: unknown): FunctionReply {
   if (isObject(reply)) {
     if (
       reply.ok === true && Object.hasOwn(reply, "data") &&
-      typeof reply.seq === "number" && Number.isSafeInteger(reply.seq)
+      (reply.seq === null || (typeof reply.seq === "number" && Number.isSafeInteger(reply.seq)))
     ) {
       return { ok: true, data: reply.data, seq: reply.seq };
     }

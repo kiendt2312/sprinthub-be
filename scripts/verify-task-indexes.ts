@@ -172,7 +172,7 @@ async function main() {
   const { values } = parseArgs({ options: { "report-only": { type: "boolean" } } });
   const redis = new RedisStore(readConfig('maintenance'), 'maintenance');
   const { client } = redis;
-  await client.connect();
+  await redis.connect();
   try {
     const report = await verifyTaskIndexes(client, redis.keys);
     console.log(JSON.stringify(report, null, 2));

@@ -12,7 +12,7 @@ export async function loadLibrary(redis: RedisStore, source?: string) {
 async function main() {
   const redis = new RedisStore(readConfig('maintenance'), 'maintenance');
   try {
-    await redis.client.connect();
+    await redis.connect();
     await loadLibrary(redis);
     log('info', 'redis_library_loaded', { version: redis.config.libVersion });
   } finally {

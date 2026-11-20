@@ -7,6 +7,15 @@ export function createKeys(prefix = process.env.REDIS_KEY_PREFIX ?? DEFAULT_KEY_
 
   return {
     prefix,
+    user: (userId: string) => `${prefix}user:${userId}`,
+    userEmail: (digest: string) => `${prefix}user-email:${digest}`,
+    usersByCreated: () => `${prefix}users-by-created`,
+    session: (digest: string) => `${prefix}session:${digest}`,
+    userSessions: (userId: string) => `${prefix}user-sessions:${userId}`,
+    platformAdmins: () => `${prefix}platform-admins`,
+    platformSettings: () => `${prefix}platform-settings`,
+    audit: () => `${prefix}stream:audit`,
+    rateLimit: (policy: string, subject: string) => `${prefix}ratelimit:${policy}:${subject}`,
     workspace: (workspaceId: string) => `${prefix}workspace:${workspaceId}`,
     workspaceMembers: (workspaceId: string) => `${prefix}workspace-members:${workspaceId}`,
     project: (projectId: string) => `${prefix}project:${projectId}`,

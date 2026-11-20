@@ -41,6 +41,17 @@ export class RedisStore {
     }
   }
 
+  async connect() {
+    const timeout = setTimeout(() => this.close(), Math.min(this.config.timeoutMs * 10, 5000));
+    try {
+      await this.client.connect();
+    } catch (cause) {
+      throw new RedisFailure('REDIS_UNAVAILABLE', cause);
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
   close() {
     if (this.client.isOpen) this.client.destroy();
   }
@@ -103,10 +114,16 @@ export class RedisStore {
     return decodeReply(raw);
   }
 
+  async callWorkspace(name: string, keys: string[], args: string[], deadline = this.deadline()) {
+    const reply = await this.call(name, keys, args, deadline);
+    if (reply.ok && reply.seq === null) throw new RedisFailure('INTERNAL_ERROR');
+    return reply;
+  }
+
   async withKeySnapshot<T extends { ok: boolean; code?: string }>(
     run: (deadline: number) => Promise<T>,
+    deadline = this.deadline(),
   ): Promise<T> {
-    const deadline = this.deadline();
     for (let attempt = 0; attempt < 3; attempt++) {
       const reply = await run(deadline);
       if (reply.ok || reply.code !== 'KEYS_MISMATCH') return reply;

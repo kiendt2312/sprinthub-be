@@ -3,7 +3,9 @@ x-local-node: &local-node
   working_dir: /app
   init: true
   volumes:
-    - .:/app:ro
+    - ./dist:/app/dist:ro
+    - ./node_modules:/app/node_modules:ro
+    - ./package.json:/app/package.json:ro
 
 services:
   redis:
@@ -30,6 +32,11 @@ services:
     <<: *local-node
     profiles: [runtime]
     command: ["node", "dist/scripts/load-library.js"]
+    volumes:
+      - ./dist:/app/dist:ro
+      - ./node_modules:/app/node_modules:ro
+      - ./package.json:/app/package.json:ro
+      - ./redis/functions:/app/redis/functions:ro
     environment:
       REDIS_MAINT_URL: redis://sh-maint:${REDIS_MAINT_PASSWORD}@redis:6379
       REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-sh:v1:}
@@ -43,8 +50,17 @@ services:
     command: ["node", "dist/src/api/main.js"]
     ports:
       - "127.0.0.1:${API_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health/ready').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 1s
+      timeout: 2s
+      retries: 15
     environment:
       API_HOST: "0.0.0.0"
+      AUTH_ORIGIN: ${AUTH_ORIGIN:-http://localhost:3000}
+      AUTH_IP_HMAC_SECRET: ${AUTH_IP_HMAC_SECRET:?Run make local-env}
+      AUTH_TRUSTED_PROXIES: ${AUTH_TRUSTED_PROXIES:-}
+      AUTH_SESSION_TOUCH_MS: ${AUTH_SESSION_TOUCH_MS:-600000}
       REDIS_APP_URL: redis://sh-app:${REDIS_APP_PASSWORD}@redis:6379
       REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-sh:v1:}
       REDIS_TIMEOUT_MS: ${REDIS_TIMEOUT_MS:-200}
