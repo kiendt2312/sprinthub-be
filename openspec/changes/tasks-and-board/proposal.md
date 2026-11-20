@@ -16,6 +16,8 @@ US-05/06/07/08/09/20 cần đường ghi và đọc task đủ để team dùng 
 
 ### Modified Capabilities
 
+- `member-unassign-worker`: hạ kích thước batch mặc định để giữ biên SLOWLOG khi tải có task Markdown dài.
+
 ## Impact
 
 Phụ thuộc change `projects`. Bổ sung OpenAPI v1, module HTTP và Redis Functions. Scope P0 gồm backlog index. API sprint, label, comment, search và SSE thuộc P1.

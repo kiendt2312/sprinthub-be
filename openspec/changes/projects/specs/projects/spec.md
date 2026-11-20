@@ -8,6 +8,14 @@ Hệ thống SHALL cho OWNER/ADMIN tạo, sửa, archive và unarchive project. 
 - **WHEN** OWNER hoặc ADMIN tạo project rồi MEMBER trong workspace xem, sửa hoặc archive project
 - **THEN** xem thành công, sửa và archive trả `403 FORBIDDEN`. MEMBER tạo project cũng nhận 403. Actor ngoài workspace nhận `404 NOT_FOUND` cho đọc và ghi.
 
+### Requirement: Giới hạn mô tả project
+
+Project description SHALL nhận tối đa 8.000 Unicode code point khi tạo hoặc sửa.
+
+#### Scenario: Biên độ dài mô tả
+- **WHEN** actor hợp lệ gửi mô tả 8.000 code point rồi gửi mô tả 8.001 code point
+- **THEN** lệnh đầu lưu nguyên văn và lệnh sau trả 400, giữ nguyên project.
+
 ### Requirement: Unique project key và version
 
 Project key SHALL khớp `[A-Z0-9]{2,10}`, unique trong workspace và giữ chỗ khi archived. Sau số issue đầu tiên, key SHALL bất biến. Ghi project SHALL kiểm version, ghi JSON, index, seq và một event trong một Function.

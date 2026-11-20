@@ -1,6 +1,6 @@
 #!lua name=sprinthub
 
-local LIB_VERSION = 4
+local LIB_VERSION = 5
 local IDEMPOTENCY_TTL = 86400
 local COLUMN_LIMIT = 500
 local STEP = 1024
@@ -131,7 +131,7 @@ local function iso_timestamp(ms)
         math.floor(time / 3600000), math.floor(time / 60000) % 60, math.floor(time / 1000) % 60, time % 1000)
 end
 
-local function prepare_outbox(keys, seq, event, change, data_json, request_hash, rebalanced)
+local function prepare_outbox(keys, seq, event, change, data_json, request_hash, rebalanced, include_rebalanced)
     local changes, stream = keys[#keys - 2], keys[#keys - 1]
     assert_type(changes, 'zset')
     assert_type(stream, 'stream')
@@ -151,9 +151,11 @@ local function prepare_outbox(keys, seq, event, change, data_json, request_hash,
         fields[#fields + 1] = 'requestId'
         fields[#fields + 1] = event.requestId
     end
-    if event.taskId then
+    if event.projectId then
         fields[#fields + 1] = 'projectId'
         fields[#fields + 1] = event.projectId
+    end
+    if event.taskId then
         fields[#fields + 1] = 'taskId'
         fields[#fields + 1] = event.taskId
     end
@@ -165,12 +167,6 @@ local function prepare_outbox(keys, seq, event, change, data_json, request_hash,
         fields[#fields + 1] = 'clientMutationId'
         fields[#fields + 1] = event.clientMutationId
     end
-    if event.entityVersion and not event.taskId then
-        fields[#fields + 1] = 'entityVersion'
-        fields[#fields + 1] = integer(event.entityVersion)
-        fields[#fields + 1] = 'clientMutationId'
-        fields[#fields + 1] = event.clientMutationId
-    end
     local entries = { seq_arg, change }
     if rebalanced then
         fields[#fields + 1] = 'rebalancedColumn'
@@ -178,7 +174,9 @@ local function prepare_outbox(keys, seq, event, change, data_json, request_hash,
         entries[#entries + 1] = seq_arg
         entries[#entries + 1] = 'board:' .. event.projectId .. ':' .. rebalanced
     end
-    local response = '{"ok":true,"data":' .. data_json .. ',"seq":' .. seq_arg .. '}'
+    local rebalanced_json = include_rebalanced and rebalanced and
+        ',"rebalancedColumn":' .. cjson.encode(rebalanced) or ''
+    local response = '{"ok":true,"data":' .. data_json .. ',"seq":' .. seq_arg .. rebalanced_json .. '}'
     local saved = cjson.encode({ requestHash = request_hash, response = response })
     return function()
         redis.call('ZADD', changes, unpack(entries))
@@ -260,7 +258,8 @@ local function plan_placement(board, task_id, same_column, after_id, before_id)
     for _, id in ipairs(redis.call('ZRANGE', board, 0, -1)) do
         if id ~= task_id then
             rank = rank + 1
-            entries[#entries + 1] = integer(rank * STEP)
+            -- Rank scores are at most 512,000 and safe to pass as Lua numbers.
+            entries[#entries + 1] = rank * STEP
             entries[#entries + 1] = id
         end
     end
@@ -270,36 +269,112 @@ local function plan_placement(board, task_id, same_column, after_id, before_id)
     return { entries = entries, rebalanced = true }
 end
 
+local function deleted_task(task)
+    return has_value(task.deletedAt) or task.isDeleted == 'true' or task.isDeleted == true
+end
+
+local function task_workspace(workspace_key, workspace_id)
+    local workspace = read_document(workspace_key)
+    if workspace and workspace.id == workspace_id and not has_value(workspace.archivedAt) then
+        return workspace
+    end
+end
+
+local function task_workspace_member(members_key, actor)
+    local role = redis.call('HGET', members_key, actor)
+    return role == 'OWNER' or role == 'ADMIN' or role == 'MEMBER'
+end
+
+local task_priorities = { LOW = true, MEDIUM = true, HIGH = true, URGENT = true }
+
+local function read_task_project(key)
+    local raw = redis.pcall('JSON.GET', key, '.id', '.workspaceId', '.archivedAt', '.key')
+    if not raw then return nil end
+    if type(raw) ~= 'table' then
+        local project = decode_document(raw)
+        return { id = project['.id'], workspaceId = project['.workspaceId'],
+            archivedAt = project['.archivedAt'], key = project['.key'] }
+    end
+    if raw.err ~= 'ERR Path does not exist' then error(raw.err) end
+    -- Older project fixtures may omit the archive marker.
+    raw = redis.call('JSON.GET', key, '$.id', '$.workspaceId', '$.archivedAt', '$.key')
+    local paths = decode_document(raw)
+    return { id = paths['$.id'][1], workspaceId = paths['$.workspaceId'][1],
+        archivedAt = paths['$.archivedAt'][1], key = paths['$.key'][1] }
+end
+
+local function auth_code_points(value)
+    if type(value) ~= 'string' then return math.huge end
+    -- Strip runs of UTF-8 continuation bytes. Each remaining byte starts one code point.
+    local leading = value:gsub('[\128-\191]+', '')
+    return #leading
+end
+
+local function within_text_limit(value, maximum)
+    return type(value) == 'string' and (#value <= maximum or auth_code_points(value) <= maximum)
+end
+
+local function valid_task_payload(payload)
+    return within_text_limit(payload.title, 200) and payload.title:find('%S') ~= nil
+        and (payload.description == nil or within_text_limit(payload.description, 20000))
+        and (payload.priority == nil or task_priorities[payload.priority] == true)
+        and (not has_value(payload.dueAtMs) or (type(payload.dueAtMs) == 'number' and payload.dueAtMs >= 0
+            and payload.dueAtMs <= MAX_SAFE_INTEGER and payload.dueAtMs == math.floor(payload.dueAtMs)))
+end
+
 local function create_task(keys, args)
-    if #keys ~= 12 or (#args ~= 10 and #args ~= 11) then
+    local p0 = #keys == 14 and #args == 11
+    if not p0 and (#keys ~= 12 or (#args ~= 10 and #args ~= 11)) then
         return reject('KEYS_MISMATCH')
     end
     local ws, project_id, actor, task_id, assignee, raw_payload, idem, request_hash, mutation_id, time = unpack(args)
     local prefix = get_prefix(keys, ws)
+    local suffixes = {
+        'workspace-members:' .. ws, 'project:' .. project_id, 'project-task-seq:' .. project_id,
+        'workspace-task-keys:' .. ws, 'task:' .. task_id, 'project-tasks:' .. project_id,
+        'board:' .. project_id .. ':TODO', 'user-assigned:' .. (assignee == '' and 'none' or assignee),
+    }
+    if p0 then
+        suffixes[9] = 'workspace:' .. ws
+        suffixes[10] = 'backlog:' .. project_id
+    end
     if not prefix or not is_id(ws) or not is_id(project_id) or not is_id(actor) or not is_id(task_id)
         or (assignee ~= '' and (not is_id(assignee) or assignee == 'none')) or idem == ''
-        or not keys_match(keys, prefix, mutation_suffixes({
-            'workspace-members:' .. ws, 'project:' .. project_id, 'project-task-seq:' .. project_id,
-            'workspace-task-keys:' .. ws, 'task:' .. task_id, 'project-tasks:' .. project_id,
-            'board:' .. project_id .. ':TODO', 'user-assigned:' .. (assignee == '' and 'none' or assignee),
-        }, ws, actor, idem)) then
+        or not keys_match(keys, prefix, mutation_suffixes(suffixes, ws, actor, idem)) then
         return reject('KEYS_MISMATCH')
     end
 
-    local project = read_document(keys[2])
-    if not project or project.workspaceId ~= ws or not redis.call('HGET', keys[1], actor) then
+    local project
+    if p0 then project = read_task_project(keys[2]) else project = read_document(keys[2]) end
+    if not project or project.workspaceId ~= ws or (p0 and project.id ~= project_id) then
         return reject('NOT_FOUND')
     end
-    local previous = replay(keys[12], request_hash)
+    local workspace
+    if p0 then
+        workspace = task_workspace(keys[9], ws)
+        if not workspace or not task_workspace_member(keys[1], actor) then
+            return reject('NOT_FOUND')
+        end
+    elseif not redis.call('HGET', keys[1], actor) then
+        return reject('NOT_FOUND')
+    end
+    local previous = replay(keys[#keys], request_hash)
     if previous then
         return previous
     end
     if has_value(project.archivedAt) then
         return reject('PROJECT_ARCHIVED')
     end
+    if p0 and has_value(workspace.suspendedAt) then
+        return reject('WORKSPACE_SUSPENDED')
+    end
     assert(redis.call('EXISTS', keys[5]) == 0, 'Caller-generated task ID already exists')
-    if assignee ~= '' and not redis.call('HGET', keys[1], assignee) then
-        return reject('ASSIGNEE_NOT_MEMBER')
+    if assignee ~= '' then
+        if p0 and not task_workspace_member(keys[1], assignee) then
+            return reject('ASSIGNEE_NOT_MEMBER')
+        elseif not p0 and not redis.call('HGET', keys[1], assignee) then
+            return reject('ASSIGNEE_NOT_MEMBER')
+        end
     end
 
     local placement, failure = plan_placement(keys[7], task_id, false, '', '')
@@ -307,6 +382,12 @@ local function create_task(keys, args)
         return failure
     end
     local number = next_counter(keys[3])
+    if p0 then
+        assert(number <= MAX_SCORE, 'Backlog issue number exceeds score bound')
+        assert_type(keys[10], 'zset')
+        assert(type(project.key) == 'string' and #project.key >= 2 and #project.key <= 10
+            and project.key:match('^[A-Z0-9]+$'), 'Invalid project key')
+    end
     local issue_key = project.key .. '-' .. integer(number)
     assert(redis.call('HEXISTS', keys[4], issue_key) == 0, 'Next issue key already exists')
     assert_type(keys[6], 'set')
@@ -315,10 +396,12 @@ local function create_task(keys, args)
     end
 
     local payload = decode_document(raw_payload)
+    if p0 and not valid_task_payload(payload) then return reject('VALIDATION_FAILED') end
     assert(type(payload.title) == 'string', 'Expected a task title')
     assert(payload.description == nil or type(payload.description) == 'string', 'Invalid description')
     assert(payload.priority == nil or type(payload.priority) == 'string', 'Invalid priority')
-    local numbers = { number = number, createdAtMs = tonumber(time), lastSeq = next_counter(keys[9]) }
+    local seq_key = keys[#keys - 3]
+    local numbers = { number = number, createdAtMs = tonumber(time), lastSeq = next_counter(seq_key) }
     local occurred_at = iso_timestamp(numbers.createdAtMs)
     if has_value(payload.dueAtMs) then
         local due = payload.dueAtMs
@@ -342,14 +425,19 @@ local function create_task(keys, args)
         requestId = args[11], type = 'TASK_CREATED', workspaceId = ws, projectId = project_id, taskId = task_id,
         actorId = actor, entityVersion = 1, clientMutationId = mutation_id, occurredAt = occurred_at,
         payload = { key = issue_key },
-    }, 'task:' .. task_id, document, request_hash, placement.rebalanced and 'TODO')
+    }, 'task:' .. task_id, document, request_hash, placement.rebalanced and 'TODO', p0)
 
     redis.call('INCR', keys[3])
     redis.call('HSETNX', keys[4], issue_key, task_id)
-    redis.call('INCR', keys[9])
-    redis.call('JSON.SET', keys[5], '$', document)
+    redis.call('INCR', seq_key)
+    if p0 then
+        redis.call('JSON.SET', keys[5], '.', document)
+    else
+        redis.call('JSON.SET', keys[5], '$', document)
+    end
     redis.call('SADD', keys[6], task_id)
     redis.call('ZADD', keys[7], unpack(placement.entries))
+    if p0 then redis.call('ZADD', keys[10], integer(number), task_id) end
     if assignee ~= '' then
         redis.call('SADD', keys[8], task_id)
     end
@@ -357,43 +445,57 @@ local function create_task(keys, args)
 end
 
 local function move_task(keys, args)
-    if #keys ~= 9 or (#args ~= 13 and #args ~= 14) then
+    local p0 = #keys == 10 and #args == 14
+    if not p0 and (#keys ~= 9 or (#args ~= 13 and #args ~= 14)) then
         return reject('KEYS_MISMATCH')
     end
     local ws, project_id, task_id, actor, from, to, after_id, before_id, expected, idem, request_hash, mutation_id, time =
         unpack(args)
     local prefix = get_prefix(keys, ws)
+    local suffixes = {
+        'workspace-members:' .. ws, 'project:' .. project_id, 'task:' .. task_id,
+        'board:' .. project_id .. ':' .. from, 'board:' .. project_id .. ':' .. to,
+    }
+    if p0 then suffixes[6] = 'workspace:' .. ws end
     if not prefix or not is_id(ws) or not is_id(project_id) or not is_id(task_id) or not is_id(actor)
-        or idem == '' or not keys_match(keys, prefix, mutation_suffixes({
-            'workspace-members:' .. ws, 'project:' .. project_id, 'task:' .. task_id,
-            'board:' .. project_id .. ':' .. from, 'board:' .. project_id .. ':' .. to,
-        }, ws, actor, idem)) then
+        or idem == '' or not keys_match(keys, prefix, mutation_suffixes(suffixes, ws, actor, idem)) then
         return reject('KEYS_MISMATCH')
     end
 
     local task = read_document(keys[3])
-    if not task or has_value(task.deletedAt) or task.isDeleted == 'true' or task.isDeleted == true then
+    if not task or (not p0 and deleted_task(task)) then
         return reject('NOT_FOUND')
     end
-    if task.workspaceId ~= ws or task.projectId ~= project_id or task.status ~= from then
+    if task.workspaceId ~= ws or task.projectId ~= project_id or task.status ~= from or (p0 and task.id ~= task_id) then
         return reject('KEYS_MISMATCH')
     end
-    local project = read_document(keys[2])
-    if not project then
+    local project
+    if p0 then project = read_task_project(keys[2]) else project = read_document(keys[2]) end
+    if not project or (p0 and project.id ~= project_id) then
         return reject('NOT_FOUND')
     end
     if project.workspaceId ~= ws then
         return reject('KEYS_MISMATCH')
     end
-    if not redis.call('HGET', keys[1], actor) then
+    local workspace
+    if p0 then
+        workspace = task_workspace(keys[6], ws)
+        if not workspace or not task_workspace_member(keys[1], actor) then
+            return reject('NOT_FOUND')
+        end
+    elseif not redis.call('HGET', keys[1], actor) then
         return reject('NOT_FOUND')
     end
-    local previous = replay(keys[9], request_hash)
+    local previous = replay(keys[#keys], request_hash)
     if previous then
         return previous
     end
+    if p0 and deleted_task(task) then return reject('NOT_FOUND') end
     if has_value(project.archivedAt) then
         return reject('PROJECT_ARCHIVED')
+    end
+    if p0 and has_value(workspace.suspendedAt) then
+        return reject('WORKSPACE_SUSPENDED')
     end
     local version = task.version
     assert(type(version) == 'number' and version == math.floor(version) and version >= 1
@@ -413,7 +515,8 @@ local function move_task(keys, args)
     end
 
     assert(version < MAX_SAFE_INTEGER, 'Task version exceeds safe integer range')
-    local seq = next_counter(keys[6])
+    local seq_key = keys[#keys - 3]
+    local seq = next_counter(seq_key)
     local numbers = { version = version + 1, lastSeq = seq }
     for _, field in ipairs({ 'number', 'createdAtMs', 'dueAtMs' }) do
         if type(task[field]) == 'number' then
@@ -428,14 +531,15 @@ local function move_task(keys, args)
         requestId = args[14], type = 'TASK_MOVED', workspaceId = ws, projectId = project_id, taskId = task_id,
         actorId = actor, entityVersion = numbers.version, clientMutationId = mutation_id,
         occurredAt = iso_timestamp(tonumber(time)), payload = { from = from, to = to },
-    }, 'task:' .. task_id, json_with_integers(task, numbers), request_hash, placement.rebalanced and to)
+    }, 'task:' .. task_id, json_with_integers(task, numbers), request_hash, placement.rebalanced and to, p0)
 
-    redis.call('INCR', keys[6])
+    redis.call('INCR', seq_key)
+    local path_root = p0 and '.' or '$.'
     redis.call('JSON.MSET',
-        keys[3], '$.status', status_json,
-        keys[3], '$.version', integer(numbers.version),
-        keys[3], '$.lastSeq', integer(seq),
-        keys[3], '$.lastClientMutationId', mutation_json)
+        keys[3], path_root .. 'status', status_json,
+        keys[3], path_root .. 'version', integer(numbers.version),
+        keys[3], path_root .. 'lastSeq', integer(seq),
+        keys[3], path_root .. 'lastClientMutationId', mutation_json)
     if from ~= to then
         redis.call('ZREM', keys[4], task_id)
     end
@@ -505,11 +609,6 @@ end
 
 local function auth_id(value)
     return type(value) == 'string' and #value == 30 and value:match('^usr_[0-7][0-9A-HJKMNP-TV-Z]+$') ~= nil
-end
-
-local function auth_code_points(value)
-    local _, count = value:gsub('[^\128-\191]', '')
-    return count
 end
 
 local function auth_integer(value, min, max)
@@ -1816,3 +1915,466 @@ do
         return ok('true')
     end)
 end
+
+-- P0 project mutations (library v5).
+local function project_id(value)
+    return type(value) == 'string' and #value == 30
+        and value:match('^prj_[0-7][0-9A-HJKMNP-TV-Z]+$') ~= nil
+end
+
+local function project_key(value)
+    return type(value) == 'string' and #value >= 2 and #value <= 10
+        and value:match('^[A-Z0-9]+$') ~= nil
+end
+
+local function project_name(value)
+    if type(value) ~= 'string' or value == '' or auth_code_points(value) > 100 then return false end
+    return value == value:gsub('^%s+', ''):gsub('%s+$', '')
+end
+
+local function project_description(value)
+    return within_text_limit(value, 8000)
+end
+
+local function project_validate_document(project, pid, ws)
+    assert(project and project.id == pid and project.workspaceId == ws and project_id(project.id)
+        and ws_id(project.workspaceId) and auth_id(project.createdBy)
+        and project_name(project.name) and project_key(project.key)
+        and type(project.description) == 'string'
+        and type(project.createdAt) == 'string'
+        and auth_integer(project.createdAtMs, 0, MAX_SAFE_INTEGER)
+        and auth_integer(project.version, 1, MAX_SAFE_INTEGER)
+        and (project.archivedAt == cjson.null or project.archivedAt == nil or type(project.archivedAt) == 'string'),
+        'Invalid project document')
+end
+
+local function project_public_json(project)
+    local data = {
+        id = project.id, workspaceId = project.workspaceId, name = project.name, key = project.key,
+        description = project.description, createdBy = project.createdBy, createdAt = project.createdAt,
+        archivedAt = project.archivedAt == nil and cjson.null or project.archivedAt,
+    }
+    return json_with_integers(data, { createdAtMs = project.createdAtMs, version = project.version })
+end
+
+local function project_document_json(data)
+    return data:sub(1, -2) .. ',"schemaVersion":1}'
+end
+
+local function project_outbox(keys, workspace, project, actor, meta, event_type, payload, data)
+    local seq_key = keys[#keys - 3]
+    local seq = next_counter(seq_key)
+    local finish = prepare_outbox(keys, seq, {
+        workspaceId = workspace.id, projectId = project.id, actorId = actor,
+        type = event_type, occurredAt = iso_timestamp(meta.now), requestId = meta.request,
+        entityVersion = project.version, clientMutationId = meta.mutation, payload = payload,
+    }, 'project:' .. project.id, data, meta.hash, false)
+
+    return function()
+        redis.call('INCR', seq_key)
+        return finish()
+    end
+end
+
+local function project_response(project, seq)
+    return '{"ok":true,"data":' .. project_public_json(project) .. ',"seq":' .. integer(seq) .. '}'
+end
+
+local function project_current_seq(key)
+    local raw = redis.call('GET', key) or '0'
+    assert(raw == '0' or raw:match('^[1-9]%d*$'), 'Invalid workspace sequence')
+    local seq = tonumber(raw)
+    assert(seq and seq <= MAX_SAFE_INTEGER, 'Workspace sequence exceeds safe integer range')
+    return seq
+end
+
+local function project_keys(keys, ws, pid, actor, idem, suffixes)
+    local prefix = auth_prefix(keys[1], 'workspace-members:' .. ws)
+    suffixes[#suffixes + 1] = 'workspace-seq:' .. ws
+    suffixes[#suffixes + 1] = 'workspace-changes:' .. ws
+    suffixes[#suffixes + 1] = 'stream:domain-events'
+    suffixes[#suffixes + 1] = 'idempotency:' .. actor .. ':' .. idem
+    if not prefix or not keys_match(keys, prefix, suffixes) then return nil end
+    return prefix
+end
+
+local function create_project(keys, args)
+    if #keys ~= 10 or #args ~= 11 then return reject('KEYS_MISMATCH') end
+    local ws, pid, actor, new_key, name, description = unpack(args, 1, 6)
+    local meta = ws_mutation_args(args, 7)
+    if not ws_id(ws) or not project_id(pid) or not auth_id(actor) or not meta then return reject('KEYS_MISMATCH') end
+    if not project_key(new_key) or not project_name(name) or not project_description(description) then
+        return reject('VALIDATION_FAILED')
+    end
+    if not project_keys(keys, ws, pid, actor, meta.idem, {
+        'workspace-members:' .. ws, 'workspace:' .. ws, 'project:' .. pid,
+        'workspace-projects:' .. ws, 'workspace-projects-page:' .. ws,
+        'project-key:' .. ws .. ':' .. new_key,
+    }) then return reject('KEYS_MISMATCH') end
+
+    ws_preflight(keys, 1, { 'hash', 'ReJSON-RL', 'ReJSON-RL', 'set', 'zset', 'string',
+        'string', 'zset', 'stream', 'string' })
+    local loaded, failure = ws_load(keys, ws, actor)
+    if not loaded then return failure end
+    if has_value(loaded.doc.archivedAt) then return reject('NOT_FOUND') end
+    local role = loaded.role
+    if role ~= 'OWNER' and role ~= 'ADMIN' then return reject('FORBIDDEN') end
+    local previous = replay(keys[10], meta.hash)
+    if previous then return previous end
+    if has_value(loaded.doc.suspendedAt) then return reject('WORKSPACE_SUSPENDED') end
+    if redis.call('EXISTS', keys[3]) == 1 then return reject('KEYS_MISMATCH') end
+    if redis.call('EXISTS', keys[6]) == 1 then return reject('PROJECT_KEY_TAKEN') end
+
+    local project = {
+        id = pid, workspaceId = ws, name = name, key = new_key, description = description,
+        createdBy = actor, createdAt = iso_timestamp(meta.now), createdAtMs = meta.now,
+        archivedAt = cjson.null, version = 1, schemaVersion = 1,
+    }
+    local data = project_public_json(project)
+    local document = project_document_json(data)
+    local finish = project_outbox(keys, loaded.doc, project, actor, meta, 'PROJECT_CREATED',
+        { projectId = pid, key = new_key }, data)
+
+    redis.call('JSON.SET', keys[3], '$', document)
+    redis.call('SADD', keys[4], pid)
+    redis.call('ZADD', keys[5], 0, pid)
+    redis.call('SET', keys[6], pid)
+    return finish()
+end
+
+local function update_project(keys, args)
+    if #keys ~= 10 or #args ~= 13 then return reject('KEYS_MISMATCH') end
+    local ws, pid, actor, old_key, new_key, mode, expected, raw_patch = unpack(args, 1, 8)
+    local meta = ws_mutation_args(args, 9)
+    if not ws_id(ws) or not project_id(pid) or not auth_id(actor) or not project_key(old_key) or not meta then
+        return reject('KEYS_MISMATCH')
+    end
+    if not project_key(new_key) or (mode ~= 'update' and mode ~= 'archive' and mode ~= 'unarchive') then
+        return reject('VALIDATION_FAILED')
+    end
+    if type(expected) ~= 'string' or not expected:match('^[1-9]%d*$') then return reject('VALIDATION_FAILED') end
+    if not project_keys(keys, ws, pid, actor, meta.idem, {
+        'workspace-members:' .. ws, 'workspace:' .. ws, 'project:' .. pid,
+        'project-key:' .. ws .. ':' .. old_key, 'project-key:' .. ws .. ':' .. new_key,
+        'project-task-seq:' .. pid,
+    }) then return reject('KEYS_MISMATCH') end
+
+    ws_preflight(keys, 1, { 'hash', 'ReJSON-RL', 'ReJSON-RL', 'string', 'string', 'string',
+        'string', 'zset', 'stream', 'string' })
+    local loaded, failure = ws_load(keys, ws, actor)
+    if not loaded then return failure end
+    if has_value(loaded.doc.archivedAt) then return reject('NOT_FOUND') end
+    local project = read_document(keys[3])
+    if not project or project.id ~= pid or project.workspaceId ~= ws then return reject('NOT_FOUND') end
+    project_validate_document(project, pid, ws)
+    if project.key ~= old_key then return reject('KEYS_MISMATCH') end
+    local role = loaded.role
+    if role ~= 'OWNER' and role ~= 'ADMIN' then return reject('FORBIDDEN') end
+    local previous = replay(keys[10], meta.hash)
+    if previous then return previous end
+    if mode ~= 'unarchive' and has_value(project.archivedAt) then return reject('PROJECT_ARCHIVED') end
+    if has_value(loaded.doc.suspendedAt) then return reject('WORKSPACE_SUSPENDED') end
+
+    local version = tonumber(expected)
+    if not auth_integer(version, 1, MAX_SAFE_INTEGER) or version ~= project.version then
+        return reject('PROJECT_VERSION_CONFLICT', '{"currentVersion":' .. integer(project.version) .. '}')
+    end
+    if redis.call('GET', keys[4]) ~= pid then
+        assert(false, 'Project key index does not point to project')
+    end
+
+    local patch = nil
+    if mode == 'update' then
+        if type(raw_patch) ~= 'string' or not raw_patch:match('^%s*{') then return reject('VALIDATION_FAILED') end
+        local ok, decoded = pcall(decode_document, raw_patch)
+        if not ok or type(decoded) ~= 'table' then return reject('VALIDATION_FAILED') end
+        patch = decoded
+        for field in pairs(patch) do
+            if field ~= 'name' and field ~= 'description' then return reject('VALIDATION_FAILED') end
+        end
+        if next(patch) == nil and new_key == old_key then return reject('VALIDATION_FAILED') end
+        if patch.name ~= nil and (type(patch.name) ~= 'string' or not project_name(patch.name)) then
+            return reject('VALIDATION_FAILED')
+        end
+        if patch.description ~= nil and not project_description(patch.description) then
+            return reject('VALIDATION_FAILED')
+        end
+    elseif raw_patch ~= '{}' or new_key ~= old_key then
+        return reject('VALIDATION_FAILED')
+    end
+
+    if mode == 'unarchive' and not has_value(project.archivedAt) then
+        local seq = project_current_seq(keys[7])
+        local response = project_response(project, seq)
+        redis.call('SET', keys[10], cjson.encode({ requestHash = meta.hash, response = response }),
+            'EX', IDEMPOTENCY_TTL)
+        return response
+    end
+
+    local changing_key = new_key ~= old_key
+    local raw_counter = redis.call('GET', keys[6]) or '0'
+    assert(raw_counter == '0' or raw_counter:match('^[1-9]%d*$'), 'Invalid project task counter')
+    local counter = tonumber(raw_counter)
+    assert(counter and counter <= MAX_SAFE_INTEGER, 'Project task counter exceeds safe integer range')
+    if changing_key then
+        if counter > 0 then return reject('PROJECT_KEY_IMMUTABLE') end
+        if redis.call('EXISTS', keys[5]) == 1 then return reject('PROJECT_KEY_TAKEN') end
+    end
+    assert(project.version < MAX_SAFE_INTEGER, 'Project version exceeds safe integer range')
+
+    if patch then
+        if patch.name ~= nil then project.name = patch.name end
+        if patch.description ~= nil then project.description = patch.description end
+    end
+    if changing_key then project.key = new_key end
+    if mode == 'archive' then project.archivedAt = iso_timestamp(meta.now) end
+    if mode == 'unarchive' then project.archivedAt = cjson.null end
+    project.version = project.version + 1
+
+    local event_type = 'PROJECT_UPDATED'
+    if mode == 'archive' then event_type = 'PROJECT_ARCHIVED' end
+    if mode == 'unarchive' then event_type = 'PROJECT_UNARCHIVED' end
+    local payload = { projectId = pid, key = project.key }
+    if patch and patch.name ~= nil then payload.name = project.name end
+    if mode == 'archive' or mode == 'unarchive' then payload.archivedAt = project.archivedAt end
+
+    local data = project_public_json(project)
+    local document = project_document_json(data)
+    local finish = project_outbox(keys, loaded.doc, project, actor, meta, event_type, payload, data)
+    if changing_key then
+        redis.call('DEL', keys[4])
+        redis.call('SET', keys[5], pid)
+    end
+    redis.call('JSON.SET', keys[3], '$', document)
+    return finish()
+end
+
+redis.register_function('sh_create_project', create_project)
+redis.register_function('sh_update_project', update_project)
+
+-- P0 task update, assignment, and delete functions (library v5).
+local function task_id(value)
+    return type(value) == 'string' and #value == 30 and value:match('^tsk_[0-7][0-9A-HJKMNP-TV-Z]+$') ~= nil
+end
+
+local function task_mutation_base(keys, args, count, suffixes)
+    if #keys ~= count then return nil, reject('KEYS_MISMATCH') end
+    local ws, pid, tid, actor = unpack(args, 1, 4)
+    local meta = ws_mutation_args(args, 9)
+    local prefix = auth_prefix(keys[1], 'workspace-members:' .. tostring(ws))
+    if not prefix or not ws_id(ws) or not project_id(pid) or not task_id(tid) or not auth_id(actor) or not meta
+        or not keys_match(keys, prefix, suffixes(meta)) then return nil, reject('KEYS_MISMATCH') end
+
+    local task = read_document(keys[4])
+    local workspace = task_workspace(keys[2], ws)
+    local project = read_task_project(keys[3])
+    if not workspace or not project or project.id ~= pid or project.workspaceId ~= ws
+        or not task or task.id ~= tid or task.workspaceId ~= ws or task.projectId ~= pid then
+        return nil, reject('NOT_FOUND')
+    end
+    local role = ws_membership(keys, 1, actor)
+    if not role then return nil, reject('NOT_FOUND') end
+    return { ws = ws, pid = pid, tid = tid, actor = actor, meta = meta,
+        task = task, workspace = workspace, project = project }
+end
+
+local function task_current_version(task)
+    assert(auth_integer(task.version, 1, MAX_SAFE_INTEGER), 'Invalid task version')
+    return task.version
+end
+
+local function task_expected_version(raw)
+    if type(raw) ~= 'string' or not raw:match('^[1-9]%d*$') then return nil end
+    local value = tonumber(raw)
+    if not auth_integer(value, 1, MAX_SAFE_INTEGER) then return nil end
+    return value
+end
+
+local function task_write(keys, args, is_assign)
+    if #args ~= 13 then return reject('KEYS_MISMATCH') end
+    local patch_ok, patch = pcall(decode_document, args[8])
+    if not patch_ok or type(patch) ~= 'table' then return reject('VALIDATION_FAILED') end
+    local old_assignee, new_assignee, expected = args[5], args[6], task_expected_version(args[7])
+    local base, failure = task_mutation_base(keys, args, 10, function(meta)
+        return mutation_suffixes({ 'workspace-members:' .. args[1], 'workspace:' .. args[1],
+            'project:' .. args[2], 'task:' .. args[3],
+            'user-assigned:' .. (args[5] == '' and 'none' or args[5]),
+            'user-assigned:' .. (args[6] == '' and 'none' or args[6]) },
+            args[1], args[4], meta.idem)
+    end)
+    if not base then return failure end
+    local task, meta = base.task, base.meta
+    local previous = replay(keys[10], meta.hash)
+    if previous then return previous end
+    if deleted_task(task) then return reject('NOT_FOUND') end
+    if has_value(base.project.archivedAt) then return reject('PROJECT_ARCHIVED') end
+    if has_value(base.workspace.suspendedAt) then return reject('WORKSPACE_SUSPENDED') end
+
+    local version = task_current_version(task)
+    if not expected then return reject('VALIDATION_FAILED') end
+    if version ~= expected then return reject('TASK_VERSION_CONFLICT', '{"currentVersion":' .. integer(version) .. '}') end
+    local actual_old = has_value(task.assigneeId) and task.assigneeId or ''
+    if old_assignee ~= actual_old or (new_assignee ~= '' and not auth_id(new_assignee)) then return reject('KEYS_MISMATCH') end
+    local assignment_supplied = patch.assigneeId ~= nil
+    local desired = patch.assigneeId
+    if desired == cjson.null then desired = '' end
+    if desired == nil then desired = old_assignee end
+    if desired ~= new_assignee then return reject('KEYS_MISMATCH') end
+    if is_assign then
+        local field_count = 0
+        for field in pairs(patch) do
+            if field ~= 'assigneeId' then return reject('VALIDATION_FAILED') end
+            field_count = field_count + 1
+        end
+        if field_count ~= 1 then return reject('VALIDATION_FAILED') end
+    end
+    if assignment_supplied and new_assignee ~= '' and not task_workspace_member(keys[1], new_assignee) then
+        return reject('ASSIGNEE_NOT_MEMBER')
+    end
+
+    if not is_assign then
+        for field, value in pairs(patch) do
+            if field == 'title' then
+                if type(value) ~= 'string' or value ~= value:match('^%s*(.-)%s*$') or #value == 0
+                    or auth_code_points(value) > 200 then return reject('VALIDATION_FAILED') end
+            elseif field == 'description' then
+                if not within_text_limit(value, 20000) then return reject('VALIDATION_FAILED') end
+            elseif field == 'priority' then
+                if value ~= 'LOW' and value ~= 'MEDIUM' and value ~= 'HIGH' and value ~= 'URGENT' then
+                    return reject('VALIDATION_FAILED')
+                end
+            elseif field == 'dueAtMs' then
+                if value ~= cjson.null and not auth_integer(value, 0, MAX_SAFE_INTEGER) then return reject('VALIDATION_FAILED') end
+            elseif field ~= 'assigneeId' then
+                return reject('VALIDATION_FAILED')
+            end
+        end
+        if next(patch) == nil then return reject('VALIDATION_FAILED') end
+    end
+
+    if old_assignee ~= '' then assert_type(keys[5], 'set') end
+    if new_assignee ~= '' then assert_type(keys[6], 'set') end
+    assert_type(keys[7], 'string')
+    assert_type(keys[8], 'zset')
+    assert_type(keys[9], 'stream')
+    assert(version < MAX_SAFE_INTEGER, 'Task version exceeds safe integer range')
+    local seq = next_counter(keys[7])
+
+    for field, value in pairs(patch) do
+        if field == 'assigneeId' then
+            task.assigneeId = value
+            task.assigneeIndexValue = new_assignee ~= '' and new_assignee or 'UNASSIGNED'
+        else
+            task[field] = value
+        end
+    end
+    task.version, task.lastSeq = version + 1, seq
+    task.lastClientMutationId = meta.mutation
+    local nums = { version = task.version, lastSeq = seq }
+    task.version, task.lastSeq = nil, nil
+    if type(task.number) == 'number' then nums.number, task.number = task.number, nil end
+    if type(task.createdAtMs) == 'number' then nums.createdAtMs, task.createdAtMs = task.createdAtMs, nil end
+    if type(task.dueAtMs) == 'number' then nums.dueAtMs, task.dueAtMs = task.dueAtMs, nil end
+    local document = json_with_integers(task, nums)
+    local event_type = is_assign and 'TASK_ASSIGNED' or 'TASK_UPDATED'
+    local changed_fields = {}
+    for field in pairs(patch) do changed_fields[#changed_fields + 1] = field end
+    table.sort(changed_fields)
+    local finish = prepare_outbox(keys, seq, {
+        requestId = meta.request, type = event_type, workspaceId = base.ws, projectId = base.pid,
+        taskId = base.tid, actorId = base.actor, entityVersion = version + 1,
+        clientMutationId = meta.mutation, occurredAt = iso_timestamp(meta.now),
+        payload = is_assign and { assigneeId = new_assignee ~= '' and new_assignee or cjson.null }
+            or { fields = changed_fields },
+    }, 'task:' .. base.tid, document, meta.hash, false)
+
+    redis.call('INCR', keys[7])
+    redis.call('JSON.SET', keys[4], '$', document)
+    if old_assignee ~= new_assignee then
+        if old_assignee ~= '' then redis.call('SREM', keys[5], base.tid) end
+        if new_assignee ~= '' then redis.call('SADD', keys[6], base.tid) end
+    end
+    return finish()
+end
+
+local function update_task(keys, args)
+    return task_write(keys, args, false)
+end
+
+local function assign_task(keys, args)
+    return task_write(keys, args, true)
+end
+
+local function delete_task(keys, args)
+    if #keys ~= 12 or #args ~= 12 then return reject('KEYS_MISMATCH') end
+    local ws, pid, tid, actor, status, old_assignee, expected = unpack(args, 1, 7)
+    local meta = ws_mutation_args(args, 8)
+    local prefix = auth_prefix(keys[1], 'workspace-members:' .. tostring(ws))
+    local suffixes = meta and mutation_suffixes({ 'workspace-members:' .. ws, 'workspace:' .. ws,
+        'project:' .. pid, 'task:' .. tid, 'project-tasks:' .. pid, 'board:' .. pid .. ':' .. status,
+        'backlog:' .. pid, 'user-assigned:' .. (old_assignee == '' and 'none' or old_assignee) }, ws, actor, meta.idem)
+    if not prefix or not ws_id(ws) or not project_id(pid) or not task_id(tid) or not auth_id(actor) or not meta
+        or (status ~= 'TODO' and status ~= 'IN_PROGRESS' and status ~= 'IN_REVIEW' and status ~= 'DONE')
+        or (old_assignee ~= '' and not auth_id(old_assignee)) or not keys_match(keys, prefix, suffixes) then
+        return reject('KEYS_MISMATCH')
+    end
+    local task, workspace, project = read_document(keys[4]), task_workspace(keys[2], ws), read_task_project(keys[3])
+    if not workspace or not project or project.id ~= pid or project.workspaceId ~= ws
+        or not task or task.id ~= tid or task.workspaceId ~= ws or task.projectId ~= pid then return reject('NOT_FOUND') end
+    local role = ws_membership(keys, 1, actor)
+    if not role then return reject('NOT_FOUND') end
+    if role ~= 'OWNER' and role ~= 'ADMIN' and task.reporterId ~= actor then return reject('FORBIDDEN') end
+    local previous = replay(keys[12], meta.hash)
+    if previous then return previous end
+    if deleted_task(task) then return reject('NOT_FOUND') end
+    if has_value(project.archivedAt) then return reject('PROJECT_ARCHIVED') end
+    if has_value(workspace.suspendedAt) then return reject('WORKSPACE_SUSPENDED') end
+    if task.status ~= status or (has_value(task.assigneeId) and task.assigneeId or '') ~= old_assignee then
+        return reject('KEYS_MISMATCH')
+    end
+    if has_value(task.sprintId) or (type(task.labelIds) == 'table' and #task.labelIds > 0) then
+        return reject('VALIDATION_FAILED')
+    end
+    local version = task_current_version(task)
+    local expected_version = task_expected_version(expected)
+    if not expected_version then return reject('VALIDATION_FAILED') end
+    if version ~= expected_version then return reject('TASK_VERSION_CONFLICT', '{"currentVersion":' .. integer(version) .. '}') end
+
+    assert_type(keys[5], 'set')
+    assert_type(keys[6], 'zset')
+    assert_type(keys[7], 'zset')
+    if old_assignee ~= '' then assert_type(keys[8], 'set') end
+    assert_type(keys[9], 'string')
+    assert_type(keys[10], 'zset')
+    assert_type(keys[11], 'stream')
+    assert(version < MAX_SAFE_INTEGER, 'Task version exceeds safe integer range')
+    local seq = next_counter(keys[9])
+    local deleted_at = iso_timestamp(meta.now)
+    task.deletedAt, task.isDeleted = deleted_at, 'true'
+    task.version, task.lastSeq = version + 1, seq
+    task.lastClientMutationId = meta.mutation
+    local nums = { version = version + 1, lastSeq = seq }
+    task.version, task.lastSeq = nil, nil
+    if type(task.number) == 'number' then nums.number, task.number = task.number, nil end
+    if type(task.createdAtMs) == 'number' then nums.createdAtMs, task.createdAtMs = task.createdAtMs, nil end
+    if type(task.dueAtMs) == 'number' then nums.dueAtMs, task.dueAtMs = task.dueAtMs, nil end
+    local document = json_with_integers(task, nums)
+    local finish = prepare_outbox(keys, seq, {
+        requestId = meta.request, type = 'TASK_DELETED', workspaceId = ws, projectId = pid,
+        taskId = tid, actorId = actor, entityVersion = version + 1,
+        clientMutationId = meta.mutation, occurredAt = deleted_at, payload = {},
+    }, 'task:' .. tid, document, meta.hash, false)
+
+    redis.call('INCR', keys[9])
+    redis.call('JSON.SET', keys[4], '$', document)
+    redis.call('SREM', keys[5], tid)
+    redis.call('ZREM', keys[6], tid)
+    -- ZREM is safe when a spike-era task has no backlog entry.
+    redis.call('ZREM', keys[7], tid)
+    if old_assignee ~= '' then redis.call('SREM', keys[8], tid) end
+    return finish()
+end
+
+redis.register_function('sh_update_task', update_task)
+redis.register_function('sh_assign_task', assign_task)
+redis.register_function('sh_delete_task', delete_task)

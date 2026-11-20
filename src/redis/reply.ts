@@ -1,5 +1,7 @@
+export type BoardColumn = 'TODO' | 'IN_PROGRESS' | 'IN_REVIEW' | 'DONE';
+
 export type FunctionReply =
-  | { ok: true; data: unknown; seq: number | null }
+  | { ok: true; data: unknown; seq: number | null; rebalancedColumn?: BoardColumn }
   | { ok: false; code: string; params: Record<string, unknown> };
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -23,7 +25,12 @@ export function decodeReply(raw: unknown): FunctionReply {
       reply.ok === true && Object.hasOwn(reply, "data") &&
       (reply.seq === null || (typeof reply.seq === "number" && Number.isSafeInteger(reply.seq)))
     ) {
-      return { ok: true, data: reply.data, seq: reply.seq };
+      const column = reply.rebalancedColumn;
+      const result = { ok: true as const, data: reply.data, seq: reply.seq };
+      if (column === undefined) return result;
+      if (column === 'TODO' || column === 'IN_PROGRESS' || column === 'IN_REVIEW' || column === 'DONE') {
+        return { ...result, rebalancedColumn: column };
+      }
     }
     if (reply.ok === false && typeof reply.code === "string" && isObject(reply.params)) {
       return { ok: false, code: reply.code, params: reply.params };

@@ -4,6 +4,8 @@ import { readConfig } from '../src/platform/config.js';
 import { startupFailed } from '../src/platform/log.js';
 import { createKeys } from "../src/redis/keys.js";
 
+import { scanByPrefix } from './index-scan.js';
+
 type Client = RedisStore["client"];
 
 export type WorkspaceIndexFinding = {
@@ -37,15 +39,6 @@ function isWorkspaceDoc(value: unknown, id: string): value is WorkspaceDoc {
     typeof ws.slug === "string" && ws.slug.length > 0 &&
     typeof ws.createdAtMs === "number" && Number.isSafeInteger(ws.createdAtMs) &&
     typeof ws.version === "number" && Number.isSafeInteger(ws.version) && ws.version > 0;
-}
-
-async function scanByPrefix(client: Client, prefix: string) {
-  const pattern = `${prefix.replace(/[\\*?[\]]/g, "\\$&")}*`;
-  const found = new Set<string>();
-  for await (const batch of client.scanIterator({ MATCH: pattern, COUNT: 500 })) {
-    for (const key of batch) found.add(key);
-  }
-  return [...found].sort();
 }
 
 /** Read canonical workspace/membership documents and every reciprocal index. */

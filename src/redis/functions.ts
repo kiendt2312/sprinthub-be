@@ -12,6 +12,7 @@ interface Mutation {
 }
 
 export interface CreateTaskInput extends Mutation {
+  workspaceGuard?: true;
   projectId: string;
   taskId: string;
   assigneeId?: string | null;
@@ -25,6 +26,7 @@ export interface CreateTaskInput extends Mutation {
 }
 
 export interface MoveTaskInput extends Mutation {
+  workspaceGuard?: true;
   projectId: string;
   taskId: string;
   from: string;
@@ -52,7 +54,7 @@ function mutationKeys(keys: RedisStore["keys"], input: Mutation) {
   ];
 }
 
-export async function createTask(client: Client, input: CreateTaskInput, keys = client.keys) {
+export async function createTask(client: Client, input: CreateTaskInput, keys = client.keys, deadline?: number) {
   const { workspaceId, projectId, actorId, taskId, idempotencyKey, clientMutationId, nowMs } = input;
   const assigneeId = input.assigneeId ?? "";
   const payload = {
@@ -69,16 +71,19 @@ export async function createTask(client: Client, input: CreateTaskInput, keys = 
   return client.callWorkspace("sh_create_task", [
       keys.workspaceMembers(workspaceId), keys.project(projectId), keys.projectTaskSeq(projectId),
       keys.workspaceTaskKeys(workspaceId), keys.task(taskId), keys.projectTasks(projectId),
-      keys.board(projectId, "TODO"), keys.userAssigned(assigneeId), ...mutationKeys(keys, input),
+      keys.board(projectId, "TODO"), keys.userAssigned(assigneeId),
+      ...(input.workspaceGuard ? [keys.workspace(workspaceId), keys.backlog(projectId)] : []),
+      ...mutationKeys(keys, input),
     ],
     [
       workspaceId, projectId, actorId, taskId, assigneeId, JSON.stringify(payload),
       idempotencyKey, hash, clientMutationId, String(nowMs), input.requestId,
     ],
+    deadline,
   );
 }
 
-export async function moveTask(client: Client, input: MoveTaskInput, keys = client.keys) {
+export async function moveTask(client: Client, input: MoveTaskInput, keys = client.keys, deadline?: number) {
   const {
     workspaceId, projectId, taskId, actorId, from, to, expectedVersion,
     idempotencyKey, clientMutationId, nowMs,
@@ -91,12 +96,15 @@ export async function moveTask(client: Client, input: MoveTaskInput, keys = clie
 
   return client.callWorkspace("sh_move_task", [
       keys.workspaceMembers(workspaceId), keys.project(projectId), keys.task(taskId),
-      keys.board(projectId, from), keys.board(projectId, to), ...mutationKeys(keys, input),
+      keys.board(projectId, from), keys.board(projectId, to),
+      ...(input.workspaceGuard ? [keys.workspace(workspaceId)] : []),
+      ...mutationKeys(keys, input),
     ],
     [
       workspaceId, projectId, taskId, actorId, from, to, afterTaskId, beforeTaskId,
       String(expectedVersion), idempotencyKey, hash, clientMutationId, String(nowMs), input.requestId,
     ],
+    deadline,
   );
 }
 

@@ -28,3 +28,7 @@ Verifier offline kiểm hai chiều SET, ZSET score 0 và unique key, kể cả 
 ## Risks / Trade-offs
 
 ZSET phân trang thêm một index có thể dựng lại từ JSON, giữ số ID mỗi truy vấn Redis có giới hạn. Bản ghi archived giữ key để không làm trùng permalink. Workspace suspend trả 423 cho mutation mới, quyền được kiểm trước replay như workspace.
+
+Phép đo Compose với mô tả 20.000 code point từng đạt 3,561 ms khi tạo và 2,683 ms khi cập nhật. Hai đường ghi dùng chung JSON response để tạo JSON gốc với schemaVersion. Kiểm độ dài khi mô tả mới đi vào Function, còn snapshot cũ chỉ cần kiểm kiểu.
+
+Lượt đo sau khi bỏ mã hóa lặp vẫn có mẫu create 2,870 ms với payload tối đa. Đặt giới hạn mô tả project 8.000 code point để giảm kích thước JSON gốc và bản ghi replay trong mỗi lượt ghi.

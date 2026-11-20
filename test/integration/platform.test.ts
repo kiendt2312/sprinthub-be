@@ -109,6 +109,12 @@ describe('platform on Redis', () => {
     }
     const worker = await connected(integrationStore('worker'));
     try {
+      const probe = 'platform-project-' + randomUUID();
+      expect(await runtime.client.sMembers(keys.workspaceProjects(probe))).toEqual([]);
+      expect(await runtime.client.zRange(keys.workspaceProjectsPage(probe), '-', '+', { BY: 'LEX' })).toEqual([]);
+      expect(await runtime.client.get(keys.projectKey(probe, 'P0'))).toBe(null);
+      expect(await runtime.client.zRange(keys.backlog(probe), 0, 0)).toEqual([]);
+      await expect(worker.client.zRange(keys.backlog(probe), 0, 0)).rejects.toThrow(/NOPERM/);
       for (const store of [runtime, worker]) {
         for (const command of [['FLUSHALL'], ['KEYS', '*'], ['SCAN', '0'], ['CONFIG', 'GET', 'save'],
           ['FUNCTION', 'LOAD', 'unused']]) {
@@ -321,7 +327,7 @@ describe('Compose lifecycle', () => {
       expect(await state()).toEqual(before);
       await vi.waitFor(() => expect(workerOutput).toContain('"event":"worker_ready"'), { timeout: 4000 });
       const { verifyTaskIndexes } = await import('../../scripts/verify-task-indexes.js');
-      expect(await verifyTaskIndexes(client, keys)).toEqual({ ok: true, findings: [] });
+      expect(await verifyTaskIndexes(client, keys, { legacy: true })).toEqual({ ok: true, findings: [] });
     } finally {
       await app.close();
       worker.kill('SIGTERM');

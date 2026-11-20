@@ -13,6 +13,7 @@ Backend dùng NestJS, TypeScript, node-redis, Redis Open Source 8 và Vitest.
 
 P0 đã archive nền NestJS API/worker, auth session, Platform Admin CLI, workspace,
 membership và worker unassign. Spec hiện hành nằm trong [openspec/specs](openspec/specs/).
+Project, task và board P0 dùng Redis Function library v5.
 
 ## Chạy backend local
 
@@ -103,7 +104,7 @@ API workspace yêu cầu session. Mutation gửi thêm `Idempotency-Key` và
 `X-Client-Mutation-Id` cùng header CSRF. Xem route, schema và mã lỗi trong
 [contract workspace](openspec/changes/archive/2026-11-20-workspaces-and-membership/contract.md).
 Worker bootstrap group `unassign`, lưu job trước ACK và tiếp tục từ lịch job
-trong Redis khi khởi động lại. Worker xử lý mặc định 50 task mỗi batch. Đặt
+trong Redis khi khởi động lại. Worker xử lý mặc định 32 task mỗi batch. Đặt
 `UNASSIGN_BATCH_SIZE` từ 1 đến 100 để điều chỉnh. Theo dõi qua `docker compose logs worker`.
 
 Dùng quyền maintenance để kiểm owner, slug và index membership khi đã ngừng ghi.
@@ -118,6 +119,23 @@ sau mất phản hồi, dedupe DLQ và retention. Smoke Compose xác nhận repl
 create, chuyển Owner, thu hồi quyền ngay và worker dọn assignee. Hai verifier
 workspace/task báo sạch. SLOWLOG ghi tối đa 0,362 ms cho sáu Function workspace
 trong smoke và 2,889 ms cho batch 100 task.
+
+## Project, task và board P0
+
+Xem [contract project](openspec/changes/projects/contract.md) và
+[contract task và board](openspec/changes/tasks-and-board/contract.md) để tích hợp
+FE. Project archived vẫn đọc được và giữ permalink. Sửa, gán, kéo và xóa task
+dùng `expectedVersion` của phiên bản vừa đọc hoặc vừa nhận từ mutation trước.
+
+Dùng quyền maintenance để kiểm chỉ mục khi đã ngừng ghi.
+
+```sh
+node --env-file=.env dist/scripts/verify-project-indexes.js
+node --env-file=.env dist/scripts/verify-task-indexes.js
+```
+
+Hai verifier đọc theo `REDIS_KEY_PREFIX`. Fixture spike dùng chữ ký create cũ
+có thể chạy task verifier với `--legacy`.
 
 ## Nghiệm thu P0 foundation và auth (library v3)
 
