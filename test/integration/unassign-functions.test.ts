@@ -118,6 +118,7 @@ it('T-007 removes only active tasks of the removed user in the job workspace', a
   expect(absent.result).toMatchObject({ ok: false, code: 'ASSIGNEE_NOT_MEMBER' });
 
   await maint.client.json.set(keys.project(local.projectId), '$.archivedAt', '2026-11-20T00:00:00.000Z');
+  await maint.client.json.del(keys.task(localTask), { path: '$.deletedAt' });
   const records = await Promise.all([persist(job), persist(job, peer)]);
   expect(records.map((entry) => entry.ok && entry.data).sort()).toEqual([false, true]);
   expect(await maint.client.zScore(keys.unassignJobsByDue(), job.id)).not.toBeNull();
@@ -209,7 +210,8 @@ it('processes a full batch within the 5 ms Redis Function budget', async () => {
     await client.configSet({ 'slowlog-log-slower-than': '0' });
     expect(await run(job, token, 1, taskIds)).toMatchObject({ ok: true, data: { done: true } });
     const records = await client.sendCommand(['SLOWLOG', 'GET', '16']) as [number, number, number, string[]][];
-    const duration = records.find(([, , , args]) => args[1] === 'sh_run_unassign_batch')?.[2];
+    const duration = records.find(([, , , args]) =>
+      args[1] === 'sh_run_unassign_batch' && args[3] === keys.unassignJob(job.id))?.[2];
     expect(duration).toBeTypeOf('number');
     expect(duration).toBeLessThan(5000);
     process.stdout.write(`P0 unassign SLOWLOG ${duration} µs at 100 tasks\n`);

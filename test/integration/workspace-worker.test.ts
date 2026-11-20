@@ -2,10 +2,10 @@ import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, expect, it, vi } from 'vitest';
 import { makeId } from '../../src/platform/http/request.js';
 import { readConfig } from '../../src/platform/config.js';
-import { RedisStore } from '../../src/redis/client.js';
+import { RedisFailure, RedisStore } from '../../src/redis/client.js';
 import { createTask, removeMember } from '../../src/redis/functions.js';
 import { UnassignWorker } from '../../src/worker/unassign-worker.js';
-import { connected, integrationStore, redisProxy } from '../support/redis.js';
+import { connected, integrationStore } from '../support/redis.js';
 
 let maint: RedisStore;
 let app: RedisStore;
@@ -119,35 +119,77 @@ it('replays an already persisted job when the source event remains pending befor
   }
 });
 
+function useFixtureScanPages(
+  store: RedisStore,
+  index: string,
+  page: (cursor: string) => { cursor: string; members: string[] },
+) {
+  const withAbortSignal = store.client.withAbortSignal.bind(store.client);
+  return vi.spyOn(store.client, 'withAbortSignal').mockImplementation((signal) => {
+    const client = withAbortSignal(signal);
+    const scan = client.sScan.bind(client);
+    const scanFixture: typeof client.sScan = (key, cursor, options) =>
+      key === index ? Promise.resolve(page(String(cursor))) : scan(key, cursor, options);
+    Object.defineProperty(client, 'sScan', { value: scanFixture });
+    return client;
+  });
+}
+
 it('resumes a multi-page job after a lost batch reply', async () => {
   const f = await fixture(205);
   const { event, jobId, stream } = await removeMemberAndFindEvent(f);
-  const proxy = await redisProxy(workerStore.config.redisUrl);
-  const proxiedStore = new RedisStore({ ...workerStore.config, redisUrl: proxy.url });
-  const firstRun = new UnassignWorker(proxiedStore, proxiedStore.config, { blockMs: 30, claimIdleMs: 0, trimIntervalMs: 60_000 });
-  let secondRun: UnassignWorker | undefined;
-  const { keys } = app;
+  const { keys } = workerStore;
+  const jobKey = keys.unassignJob(jobId);
+  const index = keys.userAssigned(f.userId);
+  const lock = keys.unassignLock(f.workspaceId, f.userId);
+  const fence = keys.unassignFence(f.workspaceId, f.userId);
+  const options = { blockMs: 30, claimIdleMs: 0 };
+  const firstStore = await connected(integrationStore('worker'));
+  const firstRun = new UnassignWorker(firstStore, firstStore.config, options);
+  const secondRun = new UnassignWorker(workerStore, workerStore.config, options);
+  const call = firstStore.call.bind(firstStore);
+  let lostReply = false;
+  const loseFirstBatchReply = vi.spyOn(firstStore, 'call').mockImplementation(async (name, declared, args, deadline) => {
+    const reply = await call(name, declared, args, deadline);
+    if (name === 'sh_run_unassign_batch' && declared[0] === jobKey && reply.ok && !lostReply) {
+      lostReply = true;
+      throw new RedisFailure('MUTATION_OUTCOME_UNKNOWN');
+    }
+    return reply;
+  });
+  const firstScan = useFixtureScanPages(firstStore, index, () => ({ cursor: '1', members: f.taskIds.slice(0, 101) }));
+  let resumeScan: ReturnType<typeof useFixtureScanPages> | undefined;
   try {
-    await connected(proxiedStore);
-    proxy.trap('sh_run_unassign_batch');
+    await leavePending(event.id, `batch-crash-${f.id}`);
+    expect(await workerStore.call('sh_persist_unassign_job', [jobKey, keys.unassignJobsByDue()],
+      [jobId, f.workspaceId, f.userId, event.message.eventId])).toMatchObject({ ok: true });
+    expect(await workerStore.client.xAck(stream, 'unassign', event.id)).toBe(1);
+
+    // Commit exactly one 100-task chunk before simulating loss of its reply.
     await firstRun.start();
-    await vi.waitFor(() => expect(proxy.count).toBeGreaterThan(0), { timeout: 7000 });
+    await vi.waitFor(() => expect(lostReply).toBe(true), { timeout: 7000 });
     await firstRun.stop();
-    const remaining = await maint.client.sCard(keys.userAssigned(f.userId));
-    expect(remaining).toBeGreaterThan(0);
-    expect(remaining).toBeLessThan(205);
+    expect(await maint.client.get(fence)).toBe('1');
+    expect(await maint.client.json.get(jobKey)).toMatchObject({ status: 'RUNNING', cursor: '0' });
+    const remaining = await maint.client.sMembers(index);
+    expect(remaining).toHaveLength(105);
 
-    await maint.client.del(keys.unassignLock(f.workspaceId, f.userId));
-    await maint.client.zAdd(keys.unassignJobsByDue(), { score: Date.now(), value: jobId });
-    proxiedStore.close();
-    await proxy.close();
-
-    secondRun = new UnassignWorker(workerStore, readConfig('worker'), { blockMs: 30, claimIdleMs: 0, trimIntervalMs: 60_000 });
+    // SSCAN COUNT is a hint. Redis can return 101 members with a nonzero cursor.
+    // Replay that shape over the actual remaining tasks, independent of hash order.
+    resumeScan = useFixtureScanPages(workerStore, index, (cursor) => {
+      if (cursor === '0') return { cursor: '1', members: remaining.slice(0, 101) };
+      expect(cursor).toBe('1');
+      return { cursor: '0', members: remaining.slice(101) };
+    });
+    await maint.client.pExpire(lock, 1);
+    await vi.waitFor(async () => expect(await maint.client.exists(lock)).toBe(0));
+    await maint.client.zAdd(keys.unassignJobsByDue(), { score: 0, value: jobId });
     await secondRun.start();
     await vi.waitFor(async () => {
-      expect(await maint.client.json.get(keys.unassignJob(jobId))).toMatchObject({ status: 'DONE' });
-      expect(await maint.client.sCard(keys.userAssigned(f.userId))).toBe(0);
-    }, { timeout: 12_000 });
+      expect(await maint.client.json.get(jobKey)).toMatchObject({ status: 'DONE' });
+    }, { timeout: 12000 });
+    expect(await maint.client.get(fence)).toBe('2');
+    expect(await maint.client.sCard(index)).toBe(0);
     const versions = await Promise.all(f.taskIds.map(async (taskId) => {
       const task = await maint.client.json.get(keys.task(taskId)) as { version: number };
       return task.version;
@@ -156,9 +198,11 @@ it('resumes a multi-page job after a lost batch reply', async () => {
     expect(await maint.client.xPendingRange(stream, 'unassign', event.id, event.id, 1)).toHaveLength(0);
   } finally {
     await firstRun.stop();
-    await secondRun?.stop();
-    proxiedStore.close();
-    await proxy.close().catch(() => undefined);
+    await secondRun.stop();
+    loseFirstBatchReply.mockRestore();
+    firstScan.mockRestore();
+    resumeScan?.mockRestore();
+    firstStore.close();
     await maint.client.xDel(stream, event.id);
   }
 });

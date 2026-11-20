@@ -227,22 +227,20 @@ export class UnassignWorker {
       const chunks = Array.from({ length: Math.ceil(scan.members.length / PAGE_SIZE) }, (_, index) =>
         scan.members.slice(index * PAGE_SIZE, (index + 1) * PAGE_SIZE));
       if (!chunks.length) chunks.push([]);
-      let nextCursor = scan.cursor;
       for (const [index, taskIds] of chunks.entries()) {
         if (this.#stopped) return;
+        // Persist the SSCAN cursor only when the last chunk of this page commits.
+        const checkpoint = index === chunks.length - 1 ? scan.cursor : '';
         const reply = await this.store.call('sh_run_unassign_batch',
           [...scope, keys.workspaceMembers(workspaceId), keys.userAssigned(userId), keys.workspaceSeq(workspaceId),
             keys.workspaceChanges(workspaceId), keys.domainEvents(), ...taskIds.map(keys.task)],
-          [jobId, workspaceId, userId, token, String(lease.epoch), cursor,
-            index === chunks.length - 1 ? nextCursor : '', ...taskIds]);
+          [jobId, workspaceId, userId, token, String(lease.epoch), cursor, checkpoint, ...taskIds]);
         if (!reply.ok || !reply.data || typeof reply.data !== 'object') return;
         const progress = reply.data as { done?: boolean; cursor?: string };
-        if (progress.done) return;
-        if (typeof progress.cursor !== 'string') return;
-        nextCursor = progress.cursor;
+        if (progress.done || progress.cursor !== (checkpoint || cursor)) return;
       }
-      if (nextCursor === cursor) return;
-      cursor = nextCursor;
+      if (scan.cursor === cursor) return;
+      cursor = scan.cursor;
       if (cursor === '0') return;
     }
   }

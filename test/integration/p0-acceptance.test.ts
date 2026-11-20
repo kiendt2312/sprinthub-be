@@ -5,12 +5,12 @@ import { tmpdir, userInfo } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import type { NestExpressApplication } from '@nestjs/platform-express';
-import { expect, it, vi } from 'vitest';
+import { expect, it } from 'vitest';
 import { createApi } from '../../src/api/app.js';
 import { LIB_VERSION, readConfig } from '../../src/platform/config.js';
 import { makeId } from '../../src/platform/http/request.js';
 import { createKeys } from '../../src/redis/keys.js';
-import { connected, integrationStore } from '../support/redis.js';
+import { connected, integrationStore, waitForRedisData } from '../support/redis.js';
 
 const exec = promisify(execFile);
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
@@ -251,12 +251,15 @@ it('keeps the 16-admin and 32-session workloads below 5 ms in Redis SLOWLOG and 
     expect(runId).toBeTruthy();
     expect(containerInfo.stdout).toContain(`run_id:${runId}`);
     await exec('docker', ['compose', 'restart', 'redis'], { timeout: 25_000 });
-    await vi.waitFor(() => expect(client.isReady).toBe(true), { timeout: 20_000 });
+    await waitForRedisData(redis);
     expect(await state()).toEqual(before);
   } finally {
-    const fixture: string[] = [];
-    for await (const batch of client.scanIterator({ MATCH: `${keys.prefix}*`, COUNT: 500 })) fixture.push(...batch);
-    if (fixture.length) await client.unlink(fixture);
-    redis.close();
+    try {
+      const fixture: string[] = [];
+      for await (const batch of client.scanIterator({ MATCH: `${keys.prefix}*`, COUNT: 500 })) fixture.push(...batch);
+      if (fixture.length) await client.unlink(fixture);
+    } finally {
+      redis.close();
+    }
   }
 }, 60_000);

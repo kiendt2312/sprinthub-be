@@ -1663,23 +1663,32 @@ do
         return response
     end)
 
-    local task_paths = { '$.id', '$.workspaceId', '$.projectId', '$.assigneeId', '$.deletedAt',
+    local task_paths = { '.id', '.workspaceId', '.projectId', '.assigneeId', '.deletedAt',
+        '.isDeleted', '.version' }
+    local optional_task_paths = { '$.id', '$.workspaceId', '$.projectId', '$.assigneeId', '$.deletedAt',
         '$.isDeleted', '$.version' }
-    local function field(document, path)
-        local wrapper = document[path]
-        return wrapper and wrapper[1]
+
+    local function read_unassign_task(key)
+        -- Single-location paths return scalars without allocating one array per field.
+        local raw = redis.pcall('JSON.GET', key, unpack(task_paths))
+        if type(raw) ~= 'table' then return raw and cjson.decode(raw) end
+        if raw.err ~= 'ERR Path does not exist' then error(raw.err) end
+
+        -- Multi-path legacy reads reject an absent field, which older records may omit.
+        local values = cjson.decode(redis.call('JSON.GET', key, unpack(optional_task_paths)))
+        local task = {}
+        for i, path in ipairs(task_paths) do task[path] = values[optional_task_paths[i]][1] end
+        return task
     end
 
-    local function plan_unassign(key, id, ws, user, seq, occurred_at)
-        local raw = redis.call('JSON.GET', key, unpack(task_paths))
-        if not raw then return nil end
-        local task = decode_document(raw)
-        if field(task, '$.id') ~= id or field(task, '$.workspaceId') ~= ws or field(task, '$.assigneeId') ~= user
-            or has_value(field(task, '$.deletedAt')) or field(task, '$.isDeleted') == 'true' then
+    local function plan_unassign(key, id, ws, user, seq, occurred_at, event_payload)
+        local task = read_unassign_task(key)
+        if not task or task['.id'] ~= id or task['.workspaceId'] ~= ws or task['.assigneeId'] ~= user
+            or has_value(task['.deletedAt']) or task['.isDeleted'] == 'true' then
             return nil
         end
-        local version = field(task, '$.version')
-        local project = field(task, '$.projectId')
+        local version = task['.version']
+        local project = task['.projectId']
         assert(auth_integer(version, 1, MAX_SAFE_INTEGER - 1), 'Invalid task version')
         assert(seq <= MAX_SAFE_INTEGER, 'Workspace seq exceeds safe integer range')
         assert(type(project) == 'string' and is_id(project), 'Invalid task project')
@@ -1691,7 +1700,7 @@ do
                 'eventId', ws .. ':' .. seq_arg, 'eventVersion', '1', 'type', 'TASK_UNASSIGNED',
                 'workspaceId', ws, 'projectId', project, 'taskId', id, 'actorId', 'worker:unassign',
                 'entityVersion', version_arg, 'seq', seq_arg, 'occurredAt', occurred_at,
-                'payload', cjson.encode({ userId = user }),
+                'payload', event_payload,
             },
         }
     end
@@ -1738,12 +1747,13 @@ do
             assert_type(keys[9], 'stream')
             first_seq = next_counter(keys[7])
             local occurred_at = iso_timestamp(now)
+            local event_payload = cjson.encode({ userId = user })
             local seen = {}
             for i = 8, #args do
                 local task_id = args[i]
                 if not seen[task_id] then
                     seen[task_id] = true
-                    local plan = plan_unassign(keys[i + 2], task_id, ws, user, first_seq + #plans, occurred_at)
+                    local plan = plan_unassign(keys[i + 2], task_id, ws, user, first_seq + #plans, occurred_at, event_payload)
                     if plan then plans[#plans + 1] = plan end
                 end
             end
@@ -1755,10 +1765,10 @@ do
             local updates, assigned, changes = {}, {}, {}
             for _, plan in ipairs(plans) do
                 for _, arg in ipairs({
-                    plan.key, '$.assigneeId', 'null',
-                    plan.key, '$.assigneeIndexValue', '"UNASSIGNED"',
-                    plan.key, '$.version', plan.version,
-                    plan.key, '$.lastSeq', plan.seq,
+                    plan.key, '.assigneeId', 'null',
+                    plan.key, '.assigneeIndexValue', '"UNASSIGNED"',
+                    plan.key, '.version', plan.version,
+                    plan.key, '.lastSeq', plan.seq,
                 }) do
                     updates[#updates + 1] = arg
                 end
