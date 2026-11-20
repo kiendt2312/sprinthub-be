@@ -1,0 +1,43 @@
+{
+  "name": "sprinthub-be",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.21.0",
+  "engines": {
+    "node": "24.x"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "start:api": "node --enable-source-maps dist/src/api/main.js",
+    "start:worker": "node --enable-source-maps dist/src/worker/main.js",
+    "redis:load": "node dist/scripts/load-library.js",
+    "openapi": "node dist/scripts/export-openapi.js",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "pnpm test:unit && pnpm test:integration",
+    "test:unit": "tsc && vitest run dist/test/unit",
+    "test:integration": "tsc && node --env-file-if-exists=.env node_modules/vitest/vitest.mjs run --no-file-parallelism dist/test/integration"
+  },
+  "dependencies": {
+    "@nestjs/common": "12.5.1",
+    "@nestjs/core": "12.5.1",
+    "@nestjs/platform-express": "12.5.1",
+    "@nestjs/swagger": "12.1.2",
+    "class-transformer": "0.5.1",
+    "class-validator": "0.15.1",
+    "express": "5.2.1",
+    "redis": "6.3.1",
+    "reflect-metadata": "0.2.2",
+    "rxjs": "7.8.2",
+    "ulid": "3.0.2"
+  },
+  "devDependencies": {
+    "@types/express": "5.0.6",
+    "@types/node": "24.19.2",
+    "eslint": "10.15.0",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.73.0",
+    "vitest": "5.1.1"
+  }
+}
