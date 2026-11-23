@@ -1,6 +1,6 @@
 # HTTP contract task và board
 
-Prefix `/api/v1`. Giống [contract project](../projects/contract.md) về session, CSRF, header, quota ghi và envelope. Chỉ list nhận query. ID task là `tsk_<ULID>`. Issue key là `[A-Z0-9]{2,10}-[1-9][0-9]*`. Các số dùng số nguyên an toàn JavaScript.
+Prefix `/api/v1`. Giống [contract project](../2026-11-23-projects/contract.md) về session, CSRF, header, quota ghi và envelope. Chỉ list nhận query. ID task là `tsk_<ULID>`. Issue key là `[A-Z0-9]{2,10}-[1-9][0-9]*`. Các số dùng số nguyên an toàn JavaScript.
 
 - `Task` gồm `id, workspaceId, projectId, number, key, title, description, descriptionFormat, status, priority, assigneeId, reporterId, sprintId, labelIds, dueAtMs, createdAt, createdAtMs, deletedAt, lastSeq, lastClientMutationId, version`. P0 `sprintId` là null, `labelIds` là mảng rỗng. `descriptionFormat` là markdown. `deletedAt` chỉ khác null trong phản hồi delete/replay tương ứng.
 - `title` trim, 1–200 code point. Markdown nguyên văn tối đa 20.000 code point, mặc định rỗng. `priority`: `LOW|MEDIUM|HIGH|URGENT`, mặc định MEDIUM. `assigneeId` và `dueAtMs` nhận null, mặc định null. `dueAtMs` là epoch ms không âm.

@@ -1,6 +1,6 @@
 # HTTP contract project
 
-Prefix `/api/v1`. Session cookie, CSRF, header/request envelope, quota ghi 120/phút/user và replay giống [contract workspace](../archive/2026-11-20-workspaces-and-membership/contract.md). Mọi route chỉ trả dữ liệu của workspace thật mà actor còn membership. Mutation yêu cầu OWNER/ADMIN. Body chỉ chấp nhận field khai báo. Route ngoài danh sách từ chối query.
+Prefix `/api/v1`. Session cookie, CSRF, header/request envelope, quota ghi 120/phút/user và replay giống [contract workspace](../2026-11-20-workspaces-and-membership/contract.md). Mọi route chỉ trả dữ liệu của workspace thật mà actor còn membership. Mutation yêu cầu OWNER/ADMIN. Body chỉ chấp nhận field khai báo. Route ngoài danh sách từ chối query.
 
 `Project` gồm `id` (`prj_<ULID>`), `workspaceId`, `name` (trim, 1–100 ký tự), `key` (`[A-Z0-9]{2,10}`), `description` (0–8.000 ký tự, mặc định chuỗi rỗng), `createdBy`, `createdAt` (ISO UTC), `createdAtMs`, `archivedAt` (ISO UTC hoặc null), `version`. Độ dài tính theo Unicode code point.
 
