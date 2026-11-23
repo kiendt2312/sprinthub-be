@@ -21,7 +21,7 @@ sau restart bằng lịch phục hồi bền, cùng Function với thao tác ghi
 
 Function SHALL kiểm lease và epoch mới nhất, kiểm user vắng khỏi
 membership và mỗi task thuộc workspace đúng, còn active và còn gán cho user.
-Worker SHALL gửi tối đa 50 task mỗi batch theo cấu hình mặc định.
+Worker SHALL gửi tối đa 32 task mỗi batch theo cấu hình mặc định.
 `UNASSIGN_BATCH_SIZE` SHALL chấp nhận số nguyên từ 1 đến 100. Function SHALL
 từ chối batch vượt 100 task. Mỗi batch SHALL lưu tiến độ, đồng bộ assigned
 index, version, seq và sự kiện.
